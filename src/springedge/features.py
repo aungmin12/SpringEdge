@@ -259,14 +259,36 @@ def compute_edge_features(
         for c in nonuple_cols:
             g[f"nonuple_{c}"] = pd.to_numeric(g[c], errors="coerce")
 
-        # Example composites (simple averages; expects inputs to be standardized)
-        g["struct_core"] = g[[f"nonuple_{c}" for c in nonuple_cols]].mean(axis=1)
-        g["struct_growth_quality"] = g[
+        # Example composites (simple averages; expects inputs to be standardized).
+        #
+        # IMPORTANT: if the caller provided precomputed composite columns (e.g. via the
+        # `structural=` frame), do not clobber them with NaNs when nonuple inputs are missing.
+        computed_struct_core = g[[f"nonuple_{c}" for c in nonuple_cols]].mean(axis=1)
+        computed_struct_growth_quality = g[
             ["nonuple_growth", "nonuple_profitability", "nonuple_quality"]
         ].mean(axis=1)
-        g["struct_value_quality"] = g[["nonuple_value", "nonuple_quality"]].mean(
+        computed_struct_value_quality = g[["nonuple_value", "nonuple_quality"]].mean(
             axis=1
         )
+        if "struct_core" in g.columns:
+            existing = pd.to_numeric(g["struct_core"], errors="coerce")
+            g["struct_core"] = existing.where(existing.notna(), computed_struct_core)
+        else:
+            g["struct_core"] = computed_struct_core
+        if "struct_growth_quality" in g.columns:
+            existing = pd.to_numeric(g["struct_growth_quality"], errors="coerce")
+            g["struct_growth_quality"] = existing.where(
+                existing.notna(), computed_struct_growth_quality
+            )
+        else:
+            g["struct_growth_quality"] = computed_struct_growth_quality
+        if "struct_value_quality" in g.columns:
+            existing = pd.to_numeric(g["struct_value_quality"], errors="coerce")
+            g["struct_value_quality"] = existing.where(
+                existing.notna(), computed_struct_value_quality
+            )
+        else:
+            g["struct_value_quality"] = computed_struct_value_quality
 
         # --- Risk: leverage flags (optional)
         # If user provides e.g. debt_to_equity, net_debt_to_ebitda, etc., we can flag here.
