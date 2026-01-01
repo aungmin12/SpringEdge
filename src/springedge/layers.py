@@ -61,6 +61,29 @@ def _validate_ident(name: str, *, kind: str) -> str:
     return n
 
 
+def _validate_table_ref(name: str, *, kind: str = "table") -> str:
+    """
+    Validate a table reference, optionally schema-qualified.
+
+    Accepts either:
+    - table
+    - schema.table
+
+    We validate each identifier part to reduce injection risk.
+    """
+    n = str(name or "").strip()
+    if not n:
+        raise ValueError(f"Invalid {kind} identifier: {name!r}")
+    parts = n.split(".")
+    if len(parts) == 1:
+        return _validate_ident(parts[0], kind=kind)
+    if len(parts) == 2:
+        schema = _validate_ident(parts[0], kind="schema")
+        table = _validate_ident(parts[1], kind=kind)
+        return f"{schema}.{table}"
+    raise ValueError(f"Invalid {kind} identifier: {name!r}")
+
+
 def _as_iso_date(value: str | date | datetime) -> str:
     if isinstance(value, datetime):
         return value.date().isoformat()
@@ -101,7 +124,17 @@ def fetch_sp500_baseline(
         """
         cur = conn.cursor()
         try:
-            cur.execute(sql)
+            try:
+                cur.execute(sql)
+            except Exception:
+                # psycopg aborts the current transaction on errors (e.g. missing table).
+                # Roll back so callers can safely retry/fallback using the same connection.
+                try:
+                    if hasattr(conn, "rollback"):
+                        conn.rollback()
+                except Exception:
+                    pass
+                raise
             rows = cur.fetchall()
             cols = [d[0] for d in (cur.description or [])]
         finally:
@@ -119,7 +152,10 @@ def fetch_sp500_baseline(
         """
         msg = str(err).lower()
         tn = str(table_name).lower()
-        return (f'relation "{tn}" does not exist' in msg) or (f"no such table: {tn}" in msg)
+        candidates = {tn}
+        if "." in tn:
+            candidates.add(tn.split(".")[-1])
+        return any((f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg) for c in candidates)
 
     def _missing_column_error(err: Exception, *, column_name: str) -> bool:
         """
@@ -132,7 +168,7 @@ def fetch_sp500_baseline(
         return (f'column "{cn}" does not exist' in msg) or (f"no such column: {cn}" in msg)
 
     def _run_query(*, _table: str, _symbol_col: str, _as_of_col: str | None) -> pd.DataFrame:
-        t = _validate_ident(_table, kind="table")
+        t = _validate_table_ref(_table, kind="table")
         sym = _validate_ident(_symbol_col, kind="column")
         asofc = _validate_ident(_as_of_col, kind="column") if _as_of_col else None
 
@@ -175,12 +211,19 @@ def fetch_sp500_baseline(
         # - Some DBs use `sp500_tickers` instead of `sp500`.
         # - Some DBs don't have an as-of snapshot column; accept a "flat list".
         if table == "sp500" and _missing_table_error(exc, table_name="sp500"):
-            try:
-                return _run_query(_table="sp500_tickers", _symbol_col=symbol_col, _as_of_col=as_of_col)
-            except Exception as exc2:
-                if as_of_col is not None and _missing_column_error(exc2, column_name=as_of_col):
-                    return _run_query(_table="sp500_tickers", _symbol_col=symbol_col, _as_of_col=None)
-                raise
+            # Try common production conventions (with/without schema).
+            candidates = ("sp500_tickers", "core.sp500_tickers")
+            last_exc: Exception | None = None
+            for cand in candidates:
+                try:
+                    return _run_query(_table=cand, _symbol_col=symbol_col, _as_of_col=as_of_col)
+                except Exception as exc2:
+                    last_exc = exc2
+                    if as_of_col is not None and _missing_column_error(exc2, column_name=as_of_col):
+                        return _run_query(_table=cand, _symbol_col=symbol_col, _as_of_col=None)
+            if last_exc is not None:
+                raise last_exc
+            raise
         raise
 
 

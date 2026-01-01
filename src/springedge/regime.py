@@ -6,7 +6,7 @@ from typing import Any
 
 import pandas as pd
 
-from .layers import _as_iso_date, _validate_ident
+from .layers import _as_iso_date, _validate_ident, _validate_table_ref
 
 
 def fetch_regime_daily(
@@ -28,7 +28,7 @@ def fetch_regime_daily(
 
     Returns a DataFrame with columns: [date_col, regime_col], ordered by date.
     """
-    t = _validate_ident(table, kind="table")
+    t = _validate_table_ref(table, kind="table")
     d = _validate_ident(date_col, kind="column")
     r = _validate_ident(regime_col, kind="column")
 
@@ -40,8 +40,25 @@ def fetch_regime_daily(
 
     where_sql = f" WHERE {' AND '.join(where)}" if where else ""
     sql = f"SELECT {d} AS {d}, {r} AS {r} FROM {t}{where_sql} ORDER BY {d}"
-    df = pd.read_sql_query(sql, conn)
-    return df
+    cur = conn.cursor()
+    try:
+        try:
+            cur.execute(sql)
+        except Exception:
+            try:
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+            except Exception:
+                pass
+            raise
+        rows = cur.fetchall()
+        cols = [desc[0] for desc in (cur.description or [])]
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return pd.DataFrame.from_records(rows, columns=cols)
 
 
 @dataclass(frozen=True)

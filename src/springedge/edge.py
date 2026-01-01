@@ -33,7 +33,7 @@ import pandas as pd
 
 from .db import db_connection
 from .features import EdgeFeatureConfig, compute_edge_features
-from .layers import _as_iso_date, _validate_ident, fetch_sp500_baseline
+from .layers import _as_iso_date, _validate_ident, _validate_table_ref, fetch_sp500_baseline
 
 
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
@@ -107,7 +107,16 @@ def fetch_ohlcv_daily(
         """
         cur = conn.cursor()
         try:
-            cur.execute(sql, list(params))
+            try:
+                cur.execute(sql, list(params))
+            except Exception:
+                # psycopg aborts transactions on errors; rollback allows safe retry/fallback.
+                try:
+                    if hasattr(conn, "rollback"):
+                        conn.rollback()
+                except Exception:
+                    pass
+                raise
             rows = cur.fetchall()
             cols = [d[0] for d in (cur.description or [])]
         finally:
@@ -120,9 +129,12 @@ def fetch_ohlcv_daily(
     def _missing_table_error(err: Exception, *, table_name: str) -> bool:
         msg = str(err).lower()
         tn = str(table_name).lower()
-        return (f'relation "{tn}" does not exist' in msg) or (f"no such table: {tn}" in msg)
+        candidates = {tn}
+        if "." in tn:
+            candidates.add(tn.split(".")[-1])
+        return any((f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg) for c in candidates)
 
-    t = _validate_ident(table, kind="table")
+    t = _validate_table_ref(table, kind="table")
     symc = _validate_ident(symbol_col, kind="column")
     dc = _validate_ident(date_col, kind="column")
     oc = _validate_ident(open_col, kind="column")
@@ -164,13 +176,35 @@ def fetch_ohlcv_daily(
     try:
         return _fetch_df(sql, params)
     except Exception as exc:
-        # Production schema compatibility: some DBs name this table `prices_daily`.
+        # Production schema compatibility: some DBs name this table `prices_daily`,
+        # and some schema-qualify it under `core`.
         if table == "ohlcv_daily" and _missing_table_error(exc, table_name="ohlcv_daily"):
-            # Retry with table alias; keep same column defaults.
+            for cand in ("prices_daily", "core.prices_daily"):
+                try:
+                    return fetch_ohlcv_daily(
+                        conn,
+                        symbols=symbols,
+                        table=cand,
+                        symbol_col=symbol_col,
+                        date_col=date_col,
+                        open_col=open_col,
+                        high_col=high_col,
+                        low_col=low_col,
+                        close_col=close_col,
+                        volume_col=volume_col,
+                        start=start,
+                        end=end,
+                    )
+                except Exception as exc2:
+                    if _missing_table_error(exc2, table_name=cand):
+                        continue
+                    raise
+        if table == "prices_daily" and _missing_table_error(exc, table_name="prices_daily"):
+            # If user explicitly set table=prices_daily, still try schema-qualified.
             return fetch_ohlcv_daily(
                 conn,
                 symbols=symbols,
-                table="prices_daily",
+                table="core.prices_daily",
                 symbol_col=symbol_col,
                 date_col=date_col,
                 open_col=open_col,
@@ -208,13 +242,21 @@ def fetch_symbol_universe_from_table(
     This is useful when a baseline membership table (like `sp500`) does not exist
     but you *do* have a prices/OHLCV table.
     """
-    t = _validate_ident(table, kind="table")
+    t = _validate_table_ref(table, kind="table")
     symc = _validate_ident(symbol_col, kind="column")
     outc = _validate_ident(out_col, kind="column")
     sql = f"SELECT DISTINCT {symc} AS {outc} FROM {t} ORDER BY {symc}"
     cur = conn.cursor()
     try:
-        cur.execute(sql)
+        try:
+            cur.execute(sql)
+        except Exception:
+            try:
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+            except Exception:
+                pass
+            raise
         rows = cur.fetchall()
         cols = [d[0] for d in (cur.description or [])]
     finally:
