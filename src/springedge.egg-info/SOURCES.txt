@@ -10,6 +10,7 @@ src/springedge/indicators.py
 src/springedge/layers.py
 src/springedge/regime.py
 src/springedge/schemas.py
+src/springedge/score_performance.py
 src/springedge.egg-info/PKG-INFO
 src/springedge.egg-info/SOURCES.txt
 src/springedge.egg-info/dependency_links.txt
