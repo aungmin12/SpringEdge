@@ -18,7 +18,7 @@ def test_compute_edge_features_basic_schema():
     out = compute_edge_features(df)
 
     # Regime
-    for c in ["regime_id", "risk_on_off", "vol_regime"]:
+    for c in ["regime_id", "regime", "risk_on_off", "vol_regime"]:
         assert c in out.columns
 
     # Tactical
@@ -54,3 +54,32 @@ def test_compute_edge_features_multi_symbol_grouping():
     out = compute_edge_features(df)
     assert set(out["symbol"].unique()) == {"A", "B"}
     assert len(out) == len(df)
+
+
+def test_compute_edge_features_universe_and_custom_horizons():
+    df = pd.DataFrame(
+        {
+            "symbol": ["AAA"] * 260,
+            "date": pd.bdate_range("2020-01-01", periods=260),
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": pd.Series(range(260), dtype="float64") + 100.0,
+            "volume": 1_000_000,
+        }
+    )
+
+    out = compute_edge_features(
+        df,
+        universe="sp500",
+        horizon_days=(7, 21, 30, 60, 90, 180, 365),
+        horizon_basis="calendar",
+    )
+
+    assert "universe" in out.columns
+    assert out["universe"].nunique() == 1
+    assert out["universe"].iloc[0] == "sp500"
+
+    # Custom horizon columns are named with the requested day labels.
+    for c in ["mom_ret_7d", "mom_ret_30d", "fwd_ret_365d"]:
+        assert c in out.columns

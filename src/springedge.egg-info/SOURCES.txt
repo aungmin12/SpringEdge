@@ -3,6 +3,7 @@ pyproject.toml
 src/springedge/__init__.py
 src/springedge/features.py
 src/springedge/indicators.py
+src/springedge/layers.py
 src/springedge.egg-info/PKG-INFO
 src/springedge.egg-info/SOURCES.txt
 src/springedge.egg-info/dependency_links.txt
