@@ -134,6 +134,12 @@ def _fetch_actionable_score_names_sql(
     - We only use this when q5-q1 units are explicit ("raw" or "percent_points").
       For "auto", we fall back to the pandas path because it relies on heuristics.
     """
+    # Only attempt SQL pushdown on Postgres drivers where we can rely on %s placeholders.
+    # This avoids side effects in sqlite tests (and avoids dialect differences).
+    conn_mod = str(getattr(conn.__class__, "__module__", "") or "")
+    if ("psycopg" not in conn_mod) and ("psycopg2" not in conn_mod):
+        return None
+
     unit = str(q5_q1_unit or "auto").strip().lower()
     if unit == "auto":
         return None
@@ -188,18 +194,8 @@ def _fetch_actionable_score_names_sql(
         except TypeError:
             # Some drivers (or sqlite) use qmark paramstyle; if so, we can't safely
             # attempt a generic rewrite here. Fall back to pandas path.
-            try:
-                if hasattr(conn, "rollback"):
-                    conn.rollback()
-            except Exception:
-                pass
             return None
         except Exception:
-            try:
-                if hasattr(conn, "rollback"):
-                    conn.rollback()
-            except Exception:
-                pass
             return None
         rows = cur.fetchall()
     finally:
