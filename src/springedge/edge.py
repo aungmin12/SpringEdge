@@ -892,13 +892,33 @@ def main(argv: Sequence[str] | None = None) -> int:
       - Demo (no DB required):
         python3 -m springedge.edge --demo
 
+      - Score performance helper (separate CLI, routed through this module for convenience):
+        python3 -m springedge.edge --score-performance --demo
+        python3 -m springedge.score_performance --demo
+
       - Real DB:
         export SPRINGEDGE_DB_URL="postgresql://..."
         python3 -m springedge.edge --baseline-as-of 2024-02-01 --horizon-days 7 21
     """
+    # Convenience dispatch: allow running `score_performance` via this CLI too.
+    # This avoids a common confusion where users run `python3 -m springedge.edge`
+    # and expect `--score-performance` to work (it historically only existed in the
+    # repo-root `edge.py` wrapper).
+    argv_list = list(argv) if argv is not None else sys.argv[1:]
+    if "--score-performance" in argv_list:
+        from .score_performance import main as _sp_main
+
+        forwarded = [a for a in argv_list if a != "--score-performance"]
+        return int(_sp_main(forwarded))
+
     p = argparse.ArgumentParser(prog="springedge.edge", description="Run end-to-end Edge orchestration and print scored candidates.")
     p.add_argument("--log-level", default="INFO", help="Logging level (e.g. DEBUG, INFO, WARNING). Default: INFO.")
     p.add_argument("--demo", action="store_true", help="Run a self-contained sqlite demo (no external DB required).")
+    p.add_argument(
+        "--score-performance",
+        action="store_true",
+        help="Run the score_performance CLI instead of the Edge pipeline.",
+    )
 
     # DB / baseline / ohlcv
     p.add_argument("--db-url", default=None, help="Database URL (overrides env var if provided).")
@@ -929,7 +949,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=0,
         help="How many candidates to print (0 = all). Default: 0.",
     )
-    args = p.parse_args(list(argv) if argv is not None else None)
+    # Parse from the already-normalized argv_list to keep behavior consistent for both
+    # `argv is None` and explicit `argv`.
+    args = p.parse_args(list(argv_list))
 
     level = getattr(logging, str(args.log_level).upper(), logging.INFO)
     logging.basicConfig(
