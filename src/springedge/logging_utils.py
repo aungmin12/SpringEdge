@@ -20,26 +20,35 @@ class TableLogFormatter(logging.Formatter):
         ts_width: int = 19,
         level_width: int = 7,
         name_width: int = 26,
+        ellipsis: str = "...",
     ) -> None:
         super().__init__(datefmt=datefmt)
         self._ts_width = int(ts_width)
         self._level_width = int(level_width)
         self._name_width = int(name_width)
+        self._ellipsis = str(ellipsis)
 
-    def _crop(self, s: str, width: int) -> str:
+    def _crop(self, s: str, width: int, *, mode: str = "right") -> str:
         s = "" if s is None else str(s)
         if width <= 0:
             return s
         if len(s) <= width:
             return s
-        if width <= 1:
+        ell = self._ellipsis
+        if not ell:
             return s[:width]
-        return s[: width - 1] + "…"
+        if width <= len(ell):
+            return s[:width]
+        if mode == "left":
+            return ell + s[-(width - len(ell)) :]
+        return s[: width - len(ell)] + ell
 
     def _format_row(self, ts: str, level: str, name: str, msg: str) -> str:
         ts_cell = self._crop(ts, self._ts_width).ljust(self._ts_width)
         level_cell = self._crop(level, self._level_width).ljust(self._level_width)
-        name_cell = self._crop(name, self._name_width).ljust(self._name_width)
+        # Keep the *rightmost* part of long logger names (usually most specific),
+        # e.g. "...score_performance" rather than "springedge.score_per..."
+        name_cell = self._crop(name, self._name_width, mode="left").ljust(self._name_width)
         return f"{ts_cell} | {level_cell} | {name_cell} | {msg}"
 
     def format(self, record: logging.LogRecord) -> str:
