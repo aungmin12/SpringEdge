@@ -34,6 +34,7 @@ import pandas as pd
 from .db import db_connection
 from .features import EdgeFeatureConfig, compute_edge_features
 from .layers import _as_iso_date, _validate_ident, _validate_table_ref, fetch_sp500_baseline
+from .regime import fetch_market_regime_daily
 
 
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
@@ -111,6 +112,23 @@ def fetch_ohlcv_daily(
     Returns a DataFrame with canonical column names:
       [symbol, date, open, high, low, close, volume]
     """
+    def _safe_rollback() -> None:
+        """
+        Best-effort rollback for drivers that abort the current transaction on errors.
+
+        Note: sqlite will rollback *all uncommitted fixture inserts* if we call rollback()
+        after a SELECT error (e.g. missing column during fallback attempts). For sqlite
+        connections, we skip rollback.
+        """
+        try:
+            mod = getattr(conn.__class__, "__module__", "") or ""
+            if "sqlite3" in mod:
+                return
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+        except Exception:
+            pass
+
     def _fetch_df(sql: str, params: Sequence[Any]) -> pd.DataFrame:
         """
         Execute a parametrized SQL query via a DB-API cursor and return a DataFrame.
@@ -124,11 +142,7 @@ def fetch_ohlcv_daily(
                 cur.execute(sql, list(params))
             except Exception:
                 # psycopg aborts transactions on errors; rollback allows safe retry/fallback.
-                try:
-                    if hasattr(conn, "rollback"):
-                        conn.rollback()
-                except Exception:
-                    pass
+                _safe_rollback()
                 raise
             rows = cur.fetchall()
             cols = [d[0] for d in (cur.description or [])]
@@ -325,11 +339,7 @@ def fetch_ohlcv_daily(
                     return _fetch_df(join_sql, join_params)
                 except Exception as exc2:
                     last_exc = exc2
-                    try:
-                        if hasattr(conn, "rollback"):
-                            conn.rollback()
-                    except Exception:
-                        pass
+                    _safe_rollback()
                     # Keep trying other likely security table names if the table is missing.
                     if _missing_table_error(exc2, table_name=st):
                         continue
@@ -344,11 +354,7 @@ def fetch_ohlcv_daily(
         # psycopg aborts transactions on errors (even for SELECT). If we are going
         # to retry a fallback table, we must rollback first or subsequent queries
         # can fail with InFailedSqlTransaction.
-        try:
-            if hasattr(conn, "rollback"):
-                conn.rollback()
-        except Exception:
-            pass
+        _safe_rollback()
 
         # Next, try common "ticker/date" alias columns on the same prices table.
         aliased = _try_fetch_with_column_aliases()
@@ -682,6 +688,9 @@ def run_edge(
     # evaluation / indicator application
     evaluation: EdgeEvaluation | None = None,
     candidates_as_of: str | date | datetime | None = None,
+    # market regime (DB)
+    market_regime_table: str = "market_regime_daily",
+    market_regime_date_col: str = "analysis_date",
 ) -> pd.DataFrame:
     """
     End-to-end "connect everything":
@@ -761,6 +770,57 @@ def run_edge(
             structural=structural,
         )
         _LOG.info("run_edge: feature rows=%d cols=%d", len(feats), feats.shape[1] if not feats.empty else 0)
+
+        # Pull the canonical market regime (if available) and join on date.
+        # This makes `regime` in the candidates reflect the market regime table,
+        # while preserving per-symbol regime primitives (risk_on_off/vol_regime/regime_id).
+        try:
+            if not feats.empty and "date" in feats.columns:
+                start_dt = pd.to_datetime(feats["date"], errors="coerce").min()
+                end_dt = pd.to_datetime(feats["date"], errors="coerce").max()
+                if pd.notna(start_dt) and pd.notna(end_dt):
+                    mkt = fetch_market_regime_daily(
+                        c,
+                        table=market_regime_table,
+                        analysis_date_col=market_regime_date_col,
+                        start=start_dt,
+                        end=end_dt,
+                    )
+                else:
+                    mkt = fetch_market_regime_daily(
+                        c,
+                        table=market_regime_table,
+                        analysis_date_col=market_regime_date_col,
+                    )
+                if not mkt.empty and market_regime_date_col in mkt.columns:
+                    m = mkt.copy()
+                    m[market_regime_date_col] = pd.to_datetime(m[market_regime_date_col], errors="coerce")
+                    m = m.dropna(subset=[market_regime_date_col]).sort_values(market_regime_date_col)
+                    # Ensure exactly one row per day (if upstream accidentally has duplicates).
+                    m = m.drop_duplicates(subset=[market_regime_date_col], keep="last")
+                    feats2 = feats.copy()
+                    feats2["date"] = pd.to_datetime(feats2["date"], errors="coerce")
+                    merged = feats2.merge(
+                        m,
+                        left_on="date",
+                        right_on=market_regime_date_col,
+                        how="left",
+                        suffixes=("", "_mkt"),
+                    )
+                    # Replace the derived per-symbol regime label with the market regime label when available.
+                    if "regime_label" in merged.columns:
+                        merged["regime"] = merged["regime_label"].astype("string")
+                    feats = merged
+                    _LOG.info(
+                        "run_edge: joined market regime rows=%d cols=%d (table=%s)",
+                        len(mkt),
+                        len(mkt.columns),
+                        market_regime_table,
+                    )
+        except Exception as exc:
+            # If the market regime table isn't present (or has schema differences), keep the derived regime.
+            _LOG.warning("run_edge: market regime join skipped (%s). Using derived regime.", exc)
+
         candidates = build_candidate_list(feats, symbol_col="symbol", date_col="date", as_of=candidates_as_of)
         _LOG.info("run_edge: candidates=%d", len(candidates))
         scored = apply_indicators_to_candidates(candidates, evaluation=evaluation)
