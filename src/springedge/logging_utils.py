@@ -80,11 +80,11 @@ def configure_logging(
         h.setFormatter(TableLogFormatter())
         handlers = [h]
 
-    # Avoid duplicate handlers if the CLI calls this more than once.
-    root = logging.getLogger()
-    if root.handlers:
-        root.handlers.clear()
-    logging.basicConfig(level=level, handlers=list(handlers))
+    # Ensure our formatter is actually used, even if another library has already
+    # configured the root logger (common in notebooks/REPLs and some CLIs).
+    #
+    # `force=True` (Python >=3.8) removes any existing root handlers first.
+    logging.basicConfig(level=level, handlers=list(handlers), force=True)
 
 
 __all__ = ["TableLogFormatter", "configure_logging"]

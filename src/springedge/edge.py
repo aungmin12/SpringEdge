@@ -39,7 +39,9 @@ from .regime import fetch_market_regime_daily, summarize_market_regime
 
 
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
-_LOG = logging.getLogger(__name__)
+# If a user runs this file directly (`python3 src/springedge/edge.py`), `__name__`
+# becomes "__main__", which looks bad in logs. Use a stable logger name instead.
+_LOG = logging.getLogger("springedge.edge" if __name__ == "__main__" else __name__)
 _LOG_SYMBOLS_PREVIEW_LIMIT = 50
 
 

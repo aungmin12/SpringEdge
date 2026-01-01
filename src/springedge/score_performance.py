@@ -26,7 +26,8 @@ except ImportError:
     from springedge.logging_utils import configure_logging  # type: ignore
     from springedge.layers import _validate_table_ref  # type: ignore
 
-_LOG = logging.getLogger(__name__)
+# If a user runs this file directly, `__name__` becomes "__main__" which is noisy.
+_LOG = logging.getLogger("springedge.score_performance" if __name__ == "__main__" else __name__)
 
 ACTIONABLE_MIN_ABS_SPEARMAN_IC = 0.10
 ACTIONABLE_MIN_IC_IR = 1.5
