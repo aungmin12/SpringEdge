@@ -254,7 +254,7 @@ def fetch_actionable_score_names(
     min_ic_ir: float = ACTIONABLE_MIN_IC_IR,
     min_abs_q5_minus_q1: float = ACTIONABLE_MIN_ABS_Q5_MINUS_Q1,
     require_all_regimes: bool = True,
-    q5_q1_unit: str = "raw",
+    q5_q1_unit: str = "auto",
 ) -> list[str]:
     """
     Filter `score_name` values by ALL criteria:
@@ -288,7 +288,8 @@ def fetch_actionable_score_names(
     if sql_res is not None:
         return sorted(set(map(str, sql_res)))
 
-    # Load from configured table, but fall back to intelligence.* and return empty if missing.
+    # Load from configured table, but fall back between common schema-qualified names and
+    # return empty if missing.
     try:
         df = _load_table_as_df(conn, table=table)
     except Exception as exc:
@@ -297,19 +298,26 @@ def fetch_actionable_score_names(
                 conn.rollback()
         except Exception:
             pass
-        if _missing_table_error(exc, table_name=table):
+        if not _missing_table_error(exc, table_name=table):
+            raise
+
+        # If caller passed an unqualified table, try the intelligence.* schema.
+        # If caller passed intelligence.* already, try the unqualified variant.
+        fallback = (
+            "intelligence.score_performance_evaluation"
+            if "." not in str(table)
+            else str(table).split(".")[-1]
+        )
+        try:
+            df = _load_table_as_df(conn, table=fallback)
+        except Exception as exc2:
             try:
-                df = _load_table_as_df(conn, table="intelligence.score_performance_evaluation")
-            except Exception as exc2:
-                try:
-                    if hasattr(conn, "rollback"):
-                        conn.rollback()
-                except Exception:
-                    pass
-                if _missing_table_error(exc2, table_name="intelligence.score_performance_evaluation"):
-                    return []
-                raise
-        else:
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+            except Exception:
+                pass
+            if _missing_table_error(exc2, table_name=fallback):
+                return []
             raise
 
     if df.empty:
@@ -447,18 +455,22 @@ def fetch_score_name_groups(
         raw = _run_query(_table=table)
     except Exception as exc:
         _safe_rollback()
-        # If the table is missing, fall back to a common schema-qualified name. If both are
-        # missing, return an empty result (this helper should be safe to call from broader
-        # pipelines where the score_performance table may not exist yet).
-        if _missing_table_error(exc, table_name=table):
-            try:
-                raw = _run_query(_table="intelligence.score_performance_evaluation")
-            except Exception as exc2:
-                _safe_rollback()
-                if _missing_table_error(exc2, table_name="intelligence.score_performance_evaluation"):
-                    return pd.DataFrame(columns=["horizon_days", "regime_label", "n_scores", "score_names"])
-                raise
-        else:
+        # If the table is missing, fall back between common schema-qualified names.
+        # If both are missing, return empty (safe for broader pipelines).
+        if not _missing_table_error(exc, table_name=table):
+            raise
+
+        fallback = (
+            "intelligence.score_performance_evaluation"
+            if "." not in str(table)
+            else str(table).split(".")[-1]
+        )
+        try:
+            raw = _run_query(_table=fallback)
+        except Exception as exc2:
+            _safe_rollback()
+            if _missing_table_error(exc2, table_name=fallback):
+                return pd.DataFrame(columns=["horizon_days", "regime_label", "n_scores", "score_names"])
             raise
 
     if raw.empty:
@@ -509,8 +521,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--env-var", default="SPRINGEDGE_DB_URL", help="Env var containing DB URL. Default: SPRINGEDGE_DB_URL.")
     p.add_argument(
         "--table",
-        default="score_performance_evaluation",
-        help="Source table name. Default: score_performance_evaluation (also tries intelligence.score_performance_evaluation).",
+        default="intelligence.score_performance_evaluation",
+        help=(
+            "Source table name. Default: intelligence.score_performance_evaluation "
+            "(if missing, also tries score_performance_evaluation)."
+        ),
     )
     p.add_argument(
         "--actionable",
