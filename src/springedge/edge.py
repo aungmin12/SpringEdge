@@ -176,6 +176,14 @@ def fetch_ohlcv_daily(
     try:
         return _fetch_df(sql, params)
     except Exception as exc:
+        # psycopg aborts transactions on errors (even for SELECT). If we are going
+        # to retry a fallback table, we must rollback first or subsequent queries
+        # can fail with InFailedSqlTransaction.
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+        except Exception:
+            pass
         # Production schema compatibility: some DBs name this table `prices_daily`,
         # and some schema-qualify it under `core`.
         if table == "ohlcv_daily" and _missing_table_error(exc, table_name="ohlcv_daily"):
