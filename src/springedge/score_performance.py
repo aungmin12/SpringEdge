@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-from typing import Any
+import argparse
+import json
+import logging
+from typing import Any, Sequence
 
 import pandas as pd
 
+from .db import db_connection
 from .layers import _validate_table_ref
+
+_LOG = logging.getLogger(__name__)
 
 
 def _missing_table_error(err: Exception, *, table_name: str) -> bool:
@@ -110,5 +116,85 @@ def fetch_score_name_groups(
     return grouped.reset_index(drop=True)
 
 
-__all__ = ["fetch_score_name_groups"]
+def main(argv: Sequence[str] | None = None) -> int:
+    """
+    CLI entrypoint: print distinct `score_name` values grouped by horizon/regime as JSON.
+
+    Examples:
+      - Demo (no DB required):
+        python3 -m springedge.score_performance --demo
+
+      - Real DB:
+        export SPRINGEDGE_DB_URL="postgresql://USER:PASSWORD@HOST:5432/DBNAME"
+        python3 -m springedge.score_performance --table score_performance_evaluation
+    """
+    p = argparse.ArgumentParser(
+        prog="springedge.score_performance",
+        description="Fetch distinct score_name values grouped by horizon_days and regime_label.",
+    )
+    p.add_argument("--log-level", default="INFO", help="Logging level (e.g. DEBUG, INFO). Default: INFO.")
+    p.add_argument("--demo", action="store_true", help="Run a self-contained sqlite demo (no external DB required).")
+    p.add_argument("--db-url", default=None, help="Database URL (overrides env var if provided).")
+    p.add_argument("--env-var", default="SPRINGEDGE_DB_URL", help="Env var containing DB URL. Default: SPRINGEDGE_DB_URL.")
+    p.add_argument(
+        "--table",
+        default="score_performance_evaluation",
+        help="Source table name. Default: score_performance_evaluation (also tries intelligence.score_performance_evaluation).",
+    )
+    args = p.parse_args(list(argv) if argv is not None else None)
+
+    level = getattr(logging, str(args.log_level).upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    if args.demo:
+        import sqlite3
+
+        _LOG.info("Running demo sqlite score_performance pipeline.")
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "create table score_performance_evaluation (score_name text, horizon_days integer, regime_label text)"
+        )
+        conn.executemany(
+            "insert into score_performance_evaluation (score_name, horizon_days, regime_label) values (?, ?, ?)",
+            [
+                ("alpha", 21, "risk_on"),
+                ("alpha", 21, "risk_on"),  # dup
+                ("beta", 21, "risk_on"),
+                ("alpha", 63, "risk_off"),
+                ("gamma", 63, "risk_off"),
+            ],
+        )
+        df = fetch_score_name_groups(conn, table=args.table)
+        try:
+            conn.close()
+        except Exception:
+            pass
+    else:
+        _LOG.info("Fetching score performance groups (table=%s).", args.table)
+        with db_connection(args.db_url, env_var=args.env_var) as conn:
+            df = fetch_score_name_groups(conn, table=args.table)
+
+    payload = [
+        {
+            "horizon_days": int(row.horizon_days),
+            "regime_label": str(row.regime_label),
+            "n_scores": int(row.n_scores),
+            "score_names": list(row.score_names),
+        }
+        for row in df.itertuples(index=False)
+    ]
+    print(json.dumps(payload, indent=2, sort_keys=False))
+    _LOG.info("Done (groups=%d).", len(payload))
+    return 0
+
+
+__all__ = ["fetch_score_name_groups", "main"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
