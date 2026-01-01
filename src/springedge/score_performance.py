@@ -78,16 +78,32 @@ def _first_present(columns: list[str], candidates: Sequence[str]) -> str | None:
     return None
 
 
-def _maybe_scale_pct(x: pd.Series) -> pd.Series:
+def _normalize_spread_units(x: pd.Series, *, unit: str = "auto") -> pd.Series:
     """
-    Heuristic: if values look like percent points (e.g. 7.2), scale to decimals (0.072).
+    Normalize q5-q1 spread units.
+
+    Some tables store spreads in:
+    - "raw" (already in the intended units, e.g. 5.0 means 5.0)
+    - "percent_points" (e.g. 5.0 means 5%, i.e. 0.05 in decimals)
+
+    `unit`:
+    - "raw": no scaling
+    - "percent_points": divide by 100
+    - "auto": best-effort heuristic (backwards compatible with earlier behavior)
     """
     s = pd.to_numeric(x, errors="coerce").astype("float64")
-    m = float(s.abs().dropna().median()) if not s.dropna().empty else 0.0
-    # If typical magnitudes exceed ~1.5, it's very likely percent points.
-    if m > 1.5:
+    unit = str(unit or "auto").strip().lower()
+    if unit == "raw":
+        return s
+    if unit in {"percent_points", "pct_points", "pp"}:
         return s / 100.0
-    return s
+    if unit == "auto":
+        m = float(s.abs().dropna().median()) if not s.dropna().empty else 0.0
+        # If typical magnitudes exceed ~1.5, it's very likely percent points.
+        if m > 1.5:
+            return s / 100.0
+        return s
+    raise ValueError(f"Unknown q5-q1 spread unit: {unit!r} (expected 'raw', 'percent_points', or 'auto').")
 
 
 def fetch_actionable_score_names(
@@ -99,6 +115,7 @@ def fetch_actionable_score_names(
     min_ic_ir: float = 1.5,
     min_abs_q5_minus_q1: float = 0.05,
     require_all_regimes: bool = True,
+    q5_q1_unit: str = "auto",
 ) -> list[str]:
     """
     Filter `score_name` values by ALL criteria:
@@ -193,9 +210,9 @@ def fetch_actionable_score_names(
     ic = pd.to_numeric(work[ic_col], errors="coerce").astype("float64")
     ir = pd.to_numeric(work[ir_col], errors="coerce").astype("float64")
     if spread_col is not None:
-        spread = _maybe_scale_pct(work[spread_col])
+        spread = _normalize_spread_units(work[spread_col], unit=q5_q1_unit)
     else:
-        spread = _maybe_scale_pct(work[q5_col]) - _maybe_scale_pct(work[q1_col])
+        spread = _normalize_spread_units(work[q5_col], unit=q5_q1_unit) - _normalize_spread_units(work[q1_col], unit=q5_q1_unit)
 
     passed = (ic.abs() >= float(min_abs_spearman_ic)) & (ir >= float(min_ic_ir)) & (spread.abs() >= float(min_abs_q5_minus_q1))
     work["_passed"] = passed.fillna(False)
@@ -343,7 +360,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--horizon-days", type=int, default=365, help="Horizon (days) used for actionable filtering. Default: 365.")
     p.add_argument("--min-abs-spearman-ic", type=float, default=0.10, help="Actionable threshold A. Default: 0.10.")
     p.add_argument("--min-ic-ir", type=float, default=1.5, help="Actionable threshold B. Default: 1.5.")
-    p.add_argument("--min-abs-q5-q1", type=float, default=0.05, help="Actionable threshold C (in decimals). Default: 0.05.")
+    p.add_argument(
+        "--min-abs-q5-q1",
+        type=float,
+        default=0.05,
+        help="Actionable threshold C for |q5-q1| (interpreted per --q5-q1-unit). Default: 0.05.",
+    )
+    p.add_argument(
+        "--q5-q1-unit",
+        default="auto",
+        choices=["auto", "raw", "percent_points"],
+        help="How to interpret q5-q1 values: raw (no scaling), percent_points (/100), or auto (heuristic). Default: auto.",
+    )
     p.add_argument(
         "--any-regime",
         action="store_true",
@@ -389,6 +417,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 min_ic_ir=args.min_ic_ir,
                 min_abs_q5_minus_q1=args.min_abs_q5_q1,
                 require_all_regimes=not args.any_regime,
+                q5_q1_unit=args.q5_q1_unit,
             )
             df = pd.DataFrame({"score_name": scores})
         else:
@@ -412,6 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     min_ic_ir=args.min_ic_ir,
                     min_abs_q5_minus_q1=args.min_abs_q5_q1,
                     require_all_regimes=not args.any_regime,
+                    q5_q1_unit=args.q5_q1_unit,
                 )
                 df = pd.DataFrame({"score_name": scores})
             else:
