@@ -229,7 +229,9 @@ def persist_topdown_evaluation(
     """
     Persist `TopDownEvaluation` output rows and return the created run_id.
     """
-    ensure_topdown_evaluation_tables(conn, run_table=run_table, result_table=result_table)
+    ensure_topdown_evaluation_tables(
+        conn, run_table=run_table, result_table=result_table
+    )
 
     rt = _validate_table_ref(run_table, kind="table")
     res_t = _validate_table_ref(result_table, kind="table")
@@ -294,7 +296,21 @@ def persist_topdown_evaluation(
             raise RuntimeError("Failed to create topdown evaluation run_id")
 
         # Optional extra context fields (stored as JSON to keep schema stable).
-        extra_cols = [c for c in ("regime_id", "risk_on_off", "vol_regime") if c in df.columns]
+        extra_cols = [
+            c
+            for c in (
+                "regime_id",
+                "risk_on_off",
+                "vol_regime",
+                # Top-down missingness flags (kept in extras_json to avoid schema churn).
+                "topdown_missing_quality_365",
+                "topdown_missing_layer_z_structural_63_126",
+                "topdown_missing_layer_z_confirm_30",
+                "topdown_missing_layer_z_trigger_21",
+                "topdown_missing_layer_z_micro_7",
+            )
+            if c in df.columns
+        ]
 
         rows: list[tuple[Any, ...]] = []
         for r in df.itertuples(index=False):
@@ -953,7 +969,12 @@ def _zscore(x: pd.Series) -> pd.Series:
     mu = s.mean()
     sig = s.std(ddof=0)
     if not np.isfinite(sig) or sig == 0.0:
-        return pd.Series(np.nan, index=s.index, dtype="float64")
+        # Degenerate distribution (e.g., singleton group): treat finite values as
+        # "no cross-sectional signal" instead of propagating NaNs.
+        out = pd.Series(np.nan, index=s.index, dtype="float64")
+        mask = np.isfinite(s.to_numpy())
+        out.iloc[np.flatnonzero(mask)] = 0.0
+        return out
     return (s - mu) / sig
 
 
@@ -1013,8 +1034,9 @@ def apply_topdown_to_candidates(
     out = candidates.copy()
 
     keys: list[str] = []
-    if date_col in out.columns:
-        keys.append(date_col)
+    # NOTE: candidates are typically a single "as-of snapshot" (one row per symbol).
+    # Grouping by date often creates singleton groups (stddev=0) which yields NaNs and
+    # then SQL NULLs on persistence. Prefer cross-sectional scoring (optionally by regime).
     if ev.regime_aware and regime_col in out.columns:
         keys.append(regime_col)
 
@@ -1030,13 +1052,17 @@ def apply_topdown_to_candidates(
     if qcols:
         _LOG.info("topdown: quality_365: using cols=%s", qcols)
         out["_raw_quality_365"] = out[qcols].mean(axis=1)
-        out["layer_z_quality_365"] = _groupwise_zscore(out, "_raw_quality_365", keys)
+        zq = _groupwise_zscore(out, "_raw_quality_365", keys)
+        missing_q = ~np.isfinite(pd.to_numeric(zq, errors="coerce").to_numpy())
+        out["layer_z_quality_365"] = pd.to_numeric(zq, errors="coerce").fillna(0.0)
+        out["topdown_missing_quality_365"] = missing_q
     else:
         _LOG.info(
             "topdown: quality_365: no quality cols present (expected one of=%s)",
             list(ev.quality_cols),
         )
-        out["layer_z_quality_365"] = np.nan
+        out["layer_z_quality_365"] = 0.0
+        out["topdown_missing_quality_365"] = True
 
     # --- Helper to build horizon layers from momentum columns
     def _build_mom_layer(days: tuple[int, ...], *, out_col: str) -> None:
@@ -1051,11 +1077,15 @@ def apply_topdown_to_candidates(
                 out_col,
                 list(days),
             )
-            out[out_col] = np.nan
+            out[out_col] = 0.0
+            out[f"topdown_missing_{out_col}"] = True
             return
         _LOG.info("topdown: %s: using cols=%s", out_col, cols)
         out[f"_raw_{out_col}"] = out[cols].mean(axis=1)
-        out[out_col] = _groupwise_zscore(out, f"_raw_{out_col}", keys)
+        z = _groupwise_zscore(out, f"_raw_{out_col}", keys)
+        missing = ~np.isfinite(pd.to_numeric(z, errors="coerce").to_numpy())
+        out[out_col] = pd.to_numeric(z, errors="coerce").fillna(0.0)
+        out[f"topdown_missing_{out_col}"] = missing
 
     _build_mom_layer(ev.structural_days, out_col="layer_z_structural_63_126")
     _build_mom_layer(ev.confirm_days, out_col="layer_z_confirm_30")
@@ -1119,7 +1149,9 @@ def apply_topdown_to_candidates(
             pass
 
     q = pd.to_numeric(out["layer_z_quality_365"], errors="coerce").astype("float64")
-    s = pd.to_numeric(out["layer_z_structural_63_126"], errors="coerce").astype("float64")
+    s = pd.to_numeric(out["layer_z_structural_63_126"], errors="coerce").astype(
+        "float64"
+    )
     c = pd.to_numeric(out["layer_z_confirm_30"], errors="coerce").astype("float64")
     t = pd.to_numeric(out["layer_z_trigger_21"], errors="coerce").astype("float64")
     m = pd.to_numeric(out["layer_z_micro_7"], errors="coerce").astype("float64")
@@ -1161,8 +1193,8 @@ def apply_topdown_to_candidates(
     wm = rules.map(lambda rr: float(rr.weight_micro_7)).astype("float64")
 
     # "Reverse order": trigger + micro are gated by the long-horizon context.
-    out["edge_score_topdown"] = (wq * q) + (ws * s) + (wc * c) + gate * (
-        (wt * t) + (wm * micro_adj)
+    out["edge_score_topdown"] = (
+        (wq * q) + (ws * s) + (wc * c) + gate * ((wt * t) + (wm * micro_adj))
     )
     try:
         sc = pd.to_numeric(out["edge_score_topdown"], errors="coerce").astype("float64")
@@ -1553,9 +1585,13 @@ def run_edge(
                     "ohlcv_start": _as_iso_date(ohlcv_start)
                     if ohlcv_start is not None
                     else None,
-                    "ohlcv_end": _as_iso_date(ohlcv_end) if ohlcv_end is not None else None,
+                    "ohlcv_end": _as_iso_date(ohlcv_end)
+                    if ohlcv_end is not None
+                    else None,
                     "universe": universe,
-                    "horizon_days": list(horizon_days) if horizon_days is not None else None,
+                    "horizon_days": list(horizon_days)
+                    if horizon_days is not None
+                    else None,
                     "horizon_basis": horizon_basis,
                     "candidates_as_of": _as_iso_date(candidates_as_of)
                     if candidates_as_of is not None
@@ -1618,10 +1654,16 @@ def _run_and_print_edge(
         horizon_days=horizon_days,
         horizon_basis=args.horizon_basis,
         candidates_as_of=args.candidates_as_of,
-        evaluation=evaluation if isinstance(evaluation, (EdgeEvaluation, TopDownEvaluation)) else None,
+        evaluation=evaluation
+        if isinstance(evaluation, (EdgeEvaluation, TopDownEvaluation))
+        else None,
         persist_topdown=bool(getattr(args, "persist_topdown", False)),
-        topdown_run_table=str(getattr(args, "topdown_run_table", "topdown_evaluation_run")),
-        topdown_result_table=str(getattr(args, "topdown_result_table", "topdown_evaluation_result")),
+        topdown_run_table=str(
+            getattr(args, "topdown_run_table", "topdown_evaluation_run")
+        ),
+        topdown_result_table=str(
+            getattr(args, "topdown_result_table", "topdown_evaluation_result")
+        ),
     )
 
     score_groups: Any = None
@@ -1688,7 +1730,9 @@ def _run_and_print_edge(
         shown_to_print = shown[cols].copy()
 
     # Keep the CLI output compact and stable.
-    with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 200):
+    with pd.option_context(
+        "display.max_rows", None, "display.max_columns", None, "display.width", 200
+    ):
         print(shown_to_print.to_string(index=False))
 
     # `fetch_score_name_groups()` returns a DataFrame, which cannot be used in a boolean
@@ -1701,21 +1745,37 @@ def _run_and_print_edge(
                 print("\nScore performance groups:")
 
                 # By default, do NOT print the full score_names lists (they can be huge).
-                cols = [c for c in ["horizon_days", "regime_label", "n_scores"] if c in score_groups.columns]
+                cols = [
+                    c
+                    for c in ["horizon_days", "regime_label", "n_scores"]
+                    if c in score_groups.columns
+                ]
                 score_groups_to_print = score_groups
 
-                if getattr(args, "print_score_names", False) and "score_names" in score_groups.columns:
+                if (
+                    getattr(args, "print_score_names", False)
+                    and "score_names" in score_groups.columns
+                ):
                     max_names = int(getattr(args, "max_score_names", 25) or 25)
                     sg = score_groups.copy()
                     sg["score_names_preview"] = sg["score_names"].apply(
-                        lambda xs: (list(xs)[:max_names] if isinstance(xs, list) else xs)
+                        lambda xs: (
+                            list(xs)[:max_names] if isinstance(xs, list) else xs
+                        )
                     )
                     cols = cols + ["score_names_preview"]
                     score_groups_to_print = sg[cols]
                 else:
                     score_groups_to_print = score_groups[cols] if cols else score_groups
 
-                with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 200):
+                with pd.option_context(
+                    "display.max_rows",
+                    None,
+                    "display.max_columns",
+                    None,
+                    "display.width",
+                    200,
+                ):
                     print(score_groups_to_print.to_string(index=False))
         elif isinstance(score_groups, dict):
             if score_groups:
