@@ -34,7 +34,7 @@ import pandas as pd
 from .db import db_connection
 from .features import EdgeFeatureConfig, compute_edge_features
 from .layers import _as_iso_date, _validate_ident, _validate_table_ref, fetch_sp500_baseline
-from .regime import fetch_market_regime_daily
+from .regime import fetch_market_regime_daily, summarize_market_regime
 
 
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
@@ -703,6 +703,7 @@ def run_edge(
     """
 
     def _run(c: Any) -> pd.DataFrame:
+        regime_summary_msg: str | None = None
         _LOG.info(
             "run_edge: baseline_table=%s baseline_as_of=%s ohlcv_table=%s ohlcv_start=%s ohlcv_end=%s horizon_days=%s horizon_basis=%s",
             baseline_table,
@@ -798,6 +799,46 @@ def run_edge(
                     m = m.dropna(subset=[market_regime_date_col]).sort_values(market_regime_date_col)
                     # Ensure exactly one row per day (if upstream accidentally has duplicates).
                     m = m.drop_duplicates(subset=[market_regime_date_col], keep="last")
+
+                    # Summarize dominant regime over the last ~3 months plus latest trend.
+                    # Best-effort: if anything looks off, we skip the summary and keep going.
+                    try:
+                        as_of = candidates_as_of
+                        if as_of is None:
+                            as_of = m[market_regime_date_col].max()
+                        _, summary = summarize_market_regime(
+                            m,
+                            as_of=as_of,
+                            lookback_days=90,
+                            trend_lookback_days=20,
+                            date_col=market_regime_date_col,
+                            regime_col="regime_label",
+                            score_col="regime_score",
+                        )
+                        share = (summary.dominant_days / float(summary.total_days)) if summary.total_days else 0.0
+                        slope_str = (
+                            ("%.6f" % summary.recent_score_slope)
+                            if isinstance(summary.recent_score_slope, float)
+                            else "None"
+                        )
+                        regime_summary_msg = (
+                            "dominant last 3 months (as-of %s): %s (%d/%d=%.1f%%). "
+                            "latest trend: %s streak=%dd share_latest_20d=%.2f score_slope_20d=%s"
+                            % (
+                                summary.as_of,
+                                summary.dominant_regime,
+                                summary.dominant_days,
+                                summary.total_days,
+                                100.0 * share,
+                                summary.latest_regime,
+                                summary.latest_streak_days,
+                                summary.recent_share_latest,
+                                slope_str,
+                            )
+                        )
+                    except Exception:
+                        regime_summary_msg = None
+
                     feats2 = feats.copy()
                     feats2["date"] = pd.to_datetime(feats2["date"], errors="coerce")
                     merged = feats2.merge(
@@ -822,7 +863,10 @@ def run_edge(
             _LOG.warning("run_edge: market regime join skipped (%s). Using derived regime.", exc)
 
         candidates = build_candidate_list(feats, symbol_col="symbol", date_col="date", as_of=candidates_as_of)
-        _LOG.info("run_edge: candidates=%d", len(candidates))
+        if regime_summary_msg:
+            _LOG.info("run_edge: candidates=%d. %s", len(candidates), regime_summary_msg)
+        else:
+            _LOG.info("run_edge: candidates=%d", len(candidates))
         scored = apply_indicators_to_candidates(candidates, evaluation=evaluation)
         _LOG.info("run_edge: scored candidates=%d (edge_score present=%s)", len(scored), "edge_score" in scored.columns)
         return scored
