@@ -15,6 +15,8 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime
+import argparse
+import logging
 import re
 from typing import Any, Iterable, Literal, Sequence
 
@@ -35,6 +37,8 @@ from .layers import _as_iso_date, _validate_ident, fetch_sp500_baseline
 
 
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
+_LOG = logging.getLogger(__name__)
+_LOG_SYMBOLS_PREVIEW_LIMIT = 50
 
 
 def _validate_symbols(symbols: Sequence[str]) -> list[str]:
@@ -335,6 +339,16 @@ def run_edge(
     """
 
     def _run(c: Any) -> pd.DataFrame:
+        _LOG.info(
+            "run_edge: baseline_table=%s baseline_as_of=%s ohlcv_table=%s ohlcv_start=%s ohlcv_end=%s horizon_days=%s horizon_basis=%s",
+            baseline_table,
+            baseline_as_of,
+            ohlcv_table,
+            ohlcv_start,
+            ohlcv_end,
+            horizon_days,
+            horizon_basis,
+        )
         baseline = fetch_sp500_baseline(
             c,
             table=baseline_table,
@@ -343,6 +357,14 @@ def run_edge(
             as_of=baseline_as_of,
         )
         symbols = baseline[baseline_symbol_col].astype("string").dropna().tolist()
+        _LOG.info("run_edge: baseline rows=%d (table=%s)", len(baseline), baseline_table)
+        _LOG.info("run_edge: baseline symbols=%d", len(symbols))
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("run_edge: baseline symbol list=%s", symbols)
+        else:
+            preview = symbols[:_LOG_SYMBOLS_PREVIEW_LIMIT]
+            suffix = "" if len(symbols) <= _LOG_SYMBOLS_PREVIEW_LIMIT else f" ... (+{len(symbols) - len(preview)} more)"
+            _LOG.info("run_edge: baseline symbol preview=%s%s", preview, suffix)
         ohlcv = fetch_ohlcv_daily(
             c,
             symbols=symbols,
@@ -352,6 +374,7 @@ def run_edge(
             start=ohlcv_start,
             end=ohlcv_end,
         )
+        _LOG.info("run_edge: ohlcv rows=%d", len(ohlcv))
         feats = compute_edge_features(
             ohlcv,
             universe=universe,
@@ -361,11 +384,177 @@ def run_edge(
             proxies=proxies,
             structural=structural,
         )
+        _LOG.info("run_edge: feature rows=%d cols=%d", len(feats), feats.shape[1] if not feats.empty else 0)
         candidates = build_candidate_list(feats, symbol_col="symbol", date_col="date", as_of=candidates_as_of)
-        return apply_indicators_to_candidates(candidates, evaluation=evaluation)
+        _LOG.info("run_edge: candidates=%d", len(candidates))
+        scored = apply_indicators_to_candidates(candidates, evaluation=evaluation)
+        _LOG.info("run_edge: scored candidates=%d (edge_score present=%s)", len(scored), "edge_score" in scored.columns)
+        return scored
 
     if conn is not None:
         return _run(conn)
     with db_connection(db_url, env_var=env_var) as c:
         return _run(c)
 
+
+def _parse_horizon_days(values: Sequence[str] | None) -> tuple[int, ...] | None:
+    """
+    Accept either repeated ints (e.g. `--horizon-days 7 21`) or a single comma string (`--horizon-days 7,21`).
+    """
+    if not values:
+        return None
+    raw = ",".join([v.strip() for v in values if str(v).strip() != ""])
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    out: list[int] = []
+    for p in parts:
+        out.append(int(p))
+    return tuple(out)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """
+    CLI entrypoint.
+
+    Examples:
+      - Demo (no DB required):
+        python3 -m springedge.edge --demo
+
+      - Real DB:
+        export SPRINGEDGE_DB_URL="postgresql://..."
+        python3 -m springedge.edge --baseline-as-of 2024-02-01 --horizon-days 7 21
+    """
+    p = argparse.ArgumentParser(prog="springedge.edge", description="Run end-to-end Edge orchestration and print scored candidates.")
+    p.add_argument("--log-level", default="INFO", help="Logging level (e.g. DEBUG, INFO, WARNING). Default: INFO.")
+    p.add_argument("--demo", action="store_true", help="Run a self-contained sqlite demo (no external DB required).")
+
+    # DB / baseline / ohlcv
+    p.add_argument("--db-url", default=None, help="Database URL (overrides env var if provided).")
+    p.add_argument("--env-var", default="SPRINGEDGE_DB_URL", help="Env var containing DB URL. Default: SPRINGEDGE_DB_URL.")
+    p.add_argument("--baseline-table", default="sp500")
+    p.add_argument("--baseline-symbol-col", default="symbol")
+    p.add_argument("--baseline-as-of-col", default="date")
+    p.add_argument("--baseline-as-of", default=None, help="Baseline snapshot as-of date (e.g. 2024-02-01).")
+    p.add_argument("--ohlcv-table", default="ohlcv_daily")
+    p.add_argument("--ohlcv-symbol-col", default="symbol")
+    p.add_argument("--ohlcv-date-col", default="date")
+    p.add_argument("--ohlcv-start", default=None, help="OHLCV start date filter (inclusive).")
+    p.add_argument("--ohlcv-end", default=None, help="OHLCV end date filter (inclusive).")
+
+    # Features / evaluation
+    p.add_argument("--universe", default="sp500")
+    p.add_argument(
+        "--horizon-days",
+        nargs="*",
+        default=None,
+        help="Horizon days (e.g. `--horizon-days 7 21` or `--horizon-days 7,21`).",
+    )
+    p.add_argument("--horizon-basis", choices=("trading", "calendar"), default="trading")
+    p.add_argument("--candidates-as-of", default=None, help="Build one row per symbol as-of this date.")
+    p.add_argument("--top", type=int, default=25, help="How many candidates to print. Default: 25.")
+    args = p.parse_args(list(argv) if argv is not None else None)
+
+    level = getattr(logging, str(args.log_level).upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    horizon_days = _parse_horizon_days(args.horizon_days)
+
+    if args.demo:
+        import sqlite3
+
+        _LOG.info("Running demo sqlite pipeline.")
+        conn = sqlite3.connect(":memory:")
+        conn.execute("create table sp500 (date text, symbol text)")
+        conn.execute(
+            "create table ohlcv_daily (symbol text, date text, open real, high real, low real, close real, volume real)"
+        )
+        conn.executemany(
+            "insert into sp500 (date, symbol) values (?, ?)",
+            [
+                ("2024-01-02", "AAA"),
+                ("2024-01-02", "BBB"),
+                ("2024-02-01", "AAA"),
+                ("2024-02-01", "BBB"),
+            ],
+        )
+        dates = pd.bdate_range("2023-01-02", periods=320)
+        for sym, base in [("AAA", 100.0), ("BBB", 50.0)]:
+            close = base * np.exp(np.cumsum(np.full(len(dates), 0.001)))
+            open_ = np.r_[close[0], close[:-1]]
+            high = np.maximum(open_, close) * 1.01
+            low = np.minimum(open_, close) * 0.99
+            vol = np.full(len(dates), 1_000_000.0)
+            rows = list(
+                zip(
+                    [sym] * len(dates),
+                    [d.date().isoformat() for d in dates],
+                    open_.astype(float),
+                    high.astype(float),
+                    low.astype(float),
+                    close.astype(float),
+                    vol.astype(float),
+                )
+            )
+            conn.executemany(
+                "insert into ohlcv_daily (symbol, date, open, high, low, close, volume) values (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+        out = run_edge(
+            conn=conn,
+            baseline_table=args.baseline_table,
+            baseline_symbol_col=args.baseline_symbol_col,
+            baseline_as_of_col=args.baseline_as_of_col,
+            baseline_as_of=args.baseline_as_of or "2024-02-01",
+            ohlcv_table=args.ohlcv_table,
+            ohlcv_symbol_col=args.ohlcv_symbol_col,
+            ohlcv_date_col=args.ohlcv_date_col,
+            ohlcv_start=args.ohlcv_start,
+            ohlcv_end=args.ohlcv_end,
+            universe=args.universe,
+            horizon_days=horizon_days or (7, 21),
+            horizon_basis=args.horizon_basis,
+            candidates_as_of=args.candidates_as_of,
+        )
+    else:
+        out = run_edge(
+            db_url=args.db_url,
+            env_var=args.env_var,
+            baseline_table=args.baseline_table,
+            baseline_symbol_col=args.baseline_symbol_col,
+            baseline_as_of_col=args.baseline_as_of_col,
+            baseline_as_of=args.baseline_as_of,
+            ohlcv_table=args.ohlcv_table,
+            ohlcv_symbol_col=args.ohlcv_symbol_col,
+            ohlcv_date_col=args.ohlcv_date_col,
+            ohlcv_start=args.ohlcv_start,
+            ohlcv_end=args.ohlcv_end,
+            universe=args.universe,
+            horizon_days=horizon_days,
+            horizon_basis=args.horizon_basis,
+            candidates_as_of=args.candidates_as_of,
+        )
+
+    if out is None or out.empty:
+        _LOG.warning("No candidates returned.")
+        return 2
+
+    if "edge_score" in out.columns:
+        view = out.sort_values("edge_score", ascending=False, kind="mergesort").reset_index(drop=True)
+    else:
+        view = out.reset_index(drop=True)
+
+    cols = [c for c in ["symbol", "date", "regime", "edge_score"] if c in view.columns]
+    # Add momentum columns if present (nice quick signal).
+    cols += [c for c in view.columns if c.startswith("mom_ret_")]
+    cols = list(dict.fromkeys(cols))  # stable de-dupe
+    print(view.loc[: max(args.top - 1, 0), cols].to_string(index=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
