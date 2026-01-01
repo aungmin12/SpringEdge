@@ -114,6 +114,18 @@ def fetch_sp500_baseline(
     Returns a DataFrame with a single column named `symbol_col`, sorted and
     de-duplicated.
     """
+    def _safe_rollback() -> None:
+        """
+        psycopg/psycopg2 can leave the connection in an aborted transaction state
+        after an error (e.g. missing table). Rolling back makes subsequent
+        fallback queries safe.
+        """
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+        except Exception:
+            pass
+
     def _fetch_df(sql: str) -> pd.DataFrame:
         """
         Execute a SQL query via DB-API cursor and return a DataFrame.
@@ -129,11 +141,7 @@ def fetch_sp500_baseline(
             except Exception:
                 # psycopg aborts the current transaction on errors (e.g. missing table).
                 # Roll back so callers can safely retry/fallback using the same connection.
-                try:
-                    if hasattr(conn, "rollback"):
-                        conn.rollback()
-                except Exception:
-                    pass
+                _safe_rollback()
                 raise
             rows = cur.fetchall()
             cols = [d[0] for d in (cur.description or [])]
@@ -207,6 +215,9 @@ def fetch_sp500_baseline(
     try:
         return _run_query(_table=table, _symbol_col=symbol_col, _as_of_col=as_of_col)
     except Exception as exc:
+        # Belt-and-suspenders: ensure the connection is usable for fallbacks even
+        # if a driver aborted the transaction on the error above.
+        _safe_rollback()
         # Production schema compatibility:
         # - Some DBs use `sp500_tickers` instead of `sp500`.
         # - Some DBs don't have an as-of snapshot column; accept a "flat list".
@@ -219,6 +230,7 @@ def fetch_sp500_baseline(
                     return _run_query(_table=cand, _symbol_col=symbol_col, _as_of_col=as_of_col)
                 except Exception as exc2:
                     last_exc = exc2
+                    _safe_rollback()
                     if as_of_col is not None and _missing_column_error(exc2, column_name=as_of_col):
                         return _run_query(_table=cand, _symbol_col=symbol_col, _as_of_col=None)
             if last_exc is not None:
