@@ -38,6 +38,7 @@ from .layers import _as_iso_date, _validate_ident, fetch_sp500_baseline
 
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 _LOG = logging.getLogger(__name__)
+_LOG_SYMBOLS_PREVIEW_LIMIT = 50
 
 
 def _validate_symbols(symbols: Sequence[str]) -> list[str]:
@@ -356,7 +357,14 @@ def run_edge(
             as_of=baseline_as_of,
         )
         symbols = baseline[baseline_symbol_col].astype("string").dropna().tolist()
+        _LOG.info("run_edge: baseline rows=%d (table=%s)", len(baseline), baseline_table)
         _LOG.info("run_edge: baseline symbols=%d", len(symbols))
+        if _LOG.isEnabledFor(logging.DEBUG):
+            _LOG.debug("run_edge: baseline symbol list=%s", symbols)
+        else:
+            preview = symbols[:_LOG_SYMBOLS_PREVIEW_LIMIT]
+            suffix = "" if len(symbols) <= _LOG_SYMBOLS_PREVIEW_LIMIT else f" ... (+{len(symbols) - len(preview)} more)"
+            _LOG.info("run_edge: baseline symbol preview=%s%s", preview, suffix)
         ohlcv = fetch_ohlcv_daily(
             c,
             symbols=symbols,
