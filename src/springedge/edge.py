@@ -98,6 +98,25 @@ def fetch_ohlcv_daily(
     Returns a DataFrame with canonical column names:
       [symbol, date, open, high, low, close, volume]
     """
+    def _fetch_df(sql: str, params: Sequence[Any]) -> pd.DataFrame:
+        """
+        Execute a parametrized SQL query via a DB-API cursor and return a DataFrame.
+
+        Avoids `pandas.read_sql_query` warnings for some DB-API connections
+        (e.g. psycopg v3) unless SQLAlchemy is used.
+        """
+        cur = conn.cursor()
+        try:
+            cur.execute(sql, list(params))
+            rows = cur.fetchall()
+            cols = [d[0] for d in (cur.description or [])]
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        return pd.DataFrame.from_records(rows, columns=cols)
+
     def _missing_table_error(err: Exception, *, table_name: str) -> bool:
         msg = str(err).lower()
         tn = str(table_name).lower()
@@ -143,7 +162,7 @@ def fetch_ohlcv_daily(
     ORDER BY {symc}, {dc}
     """
     try:
-        return pd.read_sql_query(sql, conn, params=params)
+        return _fetch_df(sql, params)
     except Exception as exc:
         # Production schema compatibility: some DBs name this table `prices_daily`.
         if table == "ohlcv_daily" and _missing_table_error(exc, table_name="ohlcv_daily"):
@@ -163,6 +182,53 @@ def fetch_ohlcv_daily(
                 end=end,
             )
         raise
+
+
+def _missing_table_error(err: Exception, *, table_name: str) -> bool:
+    """
+    Best-effort detection of missing table errors across DB drivers.
+    - Postgres (psycopg/psycopg2): relation "x" does not exist
+    - sqlite: no such table: x
+    """
+    msg = str(err).lower()
+    tn = str(table_name).lower()
+    return (f'relation "{tn}" does not exist' in msg) or (f"no such table: {tn}" in msg)
+
+
+def fetch_symbol_universe_from_table(
+    conn: Any,
+    *,
+    table: str,
+    symbol_col: str = "symbol",
+    out_col: str = "symbol",
+) -> pd.DataFrame:
+    """
+    Fallback universe loader: infer a baseline universe as DISTINCT symbols from a table.
+
+    This is useful when a baseline membership table (like `sp500`) does not exist
+    but you *do* have a prices/OHLCV table.
+    """
+    t = _validate_ident(table, kind="table")
+    symc = _validate_ident(symbol_col, kind="column")
+    outc = _validate_ident(out_col, kind="column")
+    sql = f"SELECT DISTINCT {symc} AS {outc} FROM {t} ORDER BY {symc}"
+    cur = conn.cursor()
+    try:
+        cur.execute(sql)
+        rows = cur.fetchall()
+        cols = [d[0] for d in (cur.description or [])]
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    df = pd.DataFrame.from_records(rows, columns=cols)
+    if outc not in df.columns:
+        df.columns = [str(c) for c in df.columns]
+        if outc not in df.columns and len(df.columns) == 1:
+            df = df.rename(columns={df.columns[0]: outc})
+    df[outc] = df[outc].astype("string")
+    return df.dropna().drop_duplicates().sort_values(outc).reset_index(drop=True)
 
 
 @dataclass(frozen=True)
@@ -374,13 +440,34 @@ def run_edge(
             horizon_days,
             horizon_basis,
         )
-        baseline = fetch_sp500_baseline(
-            c,
-            table=baseline_table,
-            symbol_col=baseline_symbol_col,
-            as_of_col=baseline_as_of_col,
-            as_of=baseline_as_of,
-        )
+        try:
+            baseline = fetch_sp500_baseline(
+                c,
+                table=baseline_table,
+                symbol_col=baseline_symbol_col,
+                as_of_col=baseline_as_of_col,
+                as_of=baseline_as_of,
+            )
+        except Exception as exc:
+            # If the baseline membership table doesn't exist (common when you only
+            # have OHLCV loaded), infer the universe from the OHLCV table instead.
+            attempted_tables = {str(baseline_table)}
+            if str(baseline_table) == "sp500":
+                attempted_tables.add("sp500_tickers")
+            if any(_missing_table_error(exc, table_name=t) for t in attempted_tables):
+                _LOG.warning(
+                    "Baseline table missing (%s). Falling back to DISTINCT symbols from %s.",
+                    ", ".join(sorted(attempted_tables)),
+                    ohlcv_table,
+                )
+                baseline = fetch_symbol_universe_from_table(
+                    c,
+                    table=ohlcv_table,
+                    symbol_col=ohlcv_symbol_col,
+                    out_col=baseline_symbol_col,
+                )
+            else:
+                raise
         symbols = baseline[baseline_symbol_col].astype("string").dropna().tolist()
         _LOG.info("run_edge: baseline rows=%d (table=%s)", len(baseline), baseline_table)
         _LOG.info("run_edge: baseline symbols=%d", len(symbols))

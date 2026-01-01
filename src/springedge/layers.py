@@ -91,6 +91,26 @@ def fetch_sp500_baseline(
     Returns a DataFrame with a single column named `symbol_col`, sorted and
     de-duplicated.
     """
+    def _fetch_df(sql: str) -> pd.DataFrame:
+        """
+        Execute a SQL query via DB-API cursor and return a DataFrame.
+
+        We intentionally avoid `pandas.read_sql_query` here because it emits
+        warnings for some DB-API connections (notably psycopg v3) unless
+        SQLAlchemy is used.
+        """
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+            rows = cur.fetchall()
+            cols = [d[0] for d in (cur.description or [])]
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        return pd.DataFrame.from_records(rows, columns=cols)
+
     def _missing_table_error(err: Exception, *, table_name: str) -> bool:
         """
         Best-effort detection of missing table errors across DB drivers.
@@ -135,7 +155,7 @@ def fetch_sp500_baseline(
                 )
                 """
 
-        df = pd.read_sql_query(sql, conn)
+        df = _fetch_df(sql)
         if sym not in df.columns:
             # Defensive: if a driver returns uppercased names, fall back to first column.
             df.columns = [str(c) for c in df.columns]
