@@ -87,6 +87,14 @@ def fetch_ohlcv_daily(
     volume_col: str = "volume",
     start: str | date | datetime | None = None,
     end: str | date | datetime | None = None,
+    # Optional compatibility: prices table keyed by security_id + trade_date.
+    # If your `prices_daily` table has `security_id` instead of `symbol`, we can
+    # join through `core.security` (or `security`) to map ticker symbols to IDs.
+    security_table: str = "core.security",
+    security_id_col: str = "security_id",
+    security_symbol_col: str = "symbol",
+    prices_security_id_col: str = "security_id",
+    prices_trade_date_col: str = "trade_date",
 ) -> pd.DataFrame:
     """
     Fetch daily OHLCV rows for a list of symbols.
@@ -94,6 +102,11 @@ def fetch_ohlcv_daily(
     Expected table shape (defaults):
     - table: `core.prices_daily`
     - columns: symbol, date, open, high, low, close, volume
+
+    Supported production variant (common in normalized schemas):
+    - prices table columns: security_id, trade_date, open, high, low, close, volume, ...
+    - security table columns: security_id, symbol
+    In that case, we join prices->security so callers can still pass ticker symbols.
 
     Returns a DataFrame with canonical column names:
       [symbol, date, open, high, low, close, volume]
@@ -133,6 +146,16 @@ def fetch_ohlcv_daily(
         if "." in tn:
             candidates.add(tn.split(".")[-1])
         return any((f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg) for c in candidates)
+
+    def _missing_column_error(err: Exception, *, column_name: str) -> bool:
+        """
+        Best-effort detection of missing column errors across DB drivers.
+        - Postgres: column "x" does not exist
+        - sqlite: no such column: x
+        """
+        msg = str(err).lower()
+        cn = str(column_name).lower()
+        return (f'column "{cn}" does not exist' in msg) or (f"no such column: {cn}" in msg)
 
     t = _validate_table_ref(table, kind="table")
     symc = _validate_ident(symbol_col, kind="column")
@@ -176,6 +199,77 @@ def fetch_ohlcv_daily(
     try:
         return _fetch_df(sql, params)
     except Exception as exc:
+        # Compatibility: if the target table doesn't have the assumed column names,
+        # retry a common production schema:
+        # - prices table: security_id + trade_date
+        # - join through security table to filter by ticker symbols
+        def _try_fetch_joined_security() -> pd.DataFrame | None:
+            # Only attempt this when the caller is filtering by ticker symbols.
+            if symbol_col != "symbol":
+                return None
+            if not (_missing_column_error(exc, column_name=symbol_col) or _missing_column_error(exc, column_name=date_col)):
+                return None
+
+            pt = _validate_table_ref(table, kind="table")
+            psid = _validate_ident(prices_security_id_col, kind="column")
+            pdc = _validate_ident(prices_trade_date_col, kind="column")
+            sid = _validate_ident(security_id_col, kind="column")
+            ssym = _validate_ident(security_symbol_col, kind="column")
+
+            # Prefer the configured security_table, but fall back to a common alias.
+            sec_tables = (security_table, "security", "core.security")
+            last_exc: Exception | None = None
+
+            join_where: list[str] = [f"s.{ssym} IN ({in_list})"]
+            join_params: list[Any] = list(syms)
+            if start is not None:
+                join_where.append(f"p.{pdc} >= {ph}")
+                join_params.append(_as_iso_date(start))
+            if end is not None:
+                join_where.append(f"p.{pdc} <= {ph}")
+                join_params.append(_as_iso_date(end))
+            join_where_sql = " AND ".join(join_where)
+
+            for st in sec_tables:
+                try:
+                    stq = _validate_table_ref(st, kind="table")
+                except Exception:
+                    continue
+                join_sql = f"""
+                SELECT
+                  s.{ssym} AS symbol,
+                  p.{pdc} AS date,
+                  p.{oc} AS open,
+                  p.{hc} AS high,
+                  p.{lc} AS low,
+                  p.{cc} AS close,
+                  p.{vc} AS volume
+                FROM {pt} p
+                JOIN {stq} s
+                  ON p.{psid} = s.{sid}
+                WHERE {join_where_sql}
+                ORDER BY s.{ssym}, p.{pdc}
+                """
+                try:
+                    return _fetch_df(join_sql, join_params)
+                except Exception as exc2:
+                    last_exc = exc2
+                    try:
+                        if hasattr(conn, "rollback"):
+                            conn.rollback()
+                    except Exception:
+                        pass
+                    # Keep trying other likely security table names if the table is missing.
+                    if _missing_table_error(exc2, table_name=st):
+                        continue
+                    # If the join/columns don't exist, don't swallow it silently.
+                    # We'll fall back to the original error below.
+                    break
+
+            if last_exc is not None:
+                raise last_exc
+            return None
+
         # psycopg aborts transactions on errors (even for SELECT). If we are going
         # to retry a fallback table, we must rollback first or subsequent queries
         # can fail with InFailedSqlTransaction.
@@ -184,6 +278,12 @@ def fetch_ohlcv_daily(
                 conn.rollback()
         except Exception:
             pass
+
+        # First, try the joined-security compatibility path.
+        joined = _try_fetch_joined_security()
+        if joined is not None:
+            return joined
+
         # Production schema compatibility: many DBs store daily prices in a schema,
         # e.g. `core.prices_daily`, while others expose it as `prices_daily` or `ohlcv_daily`.
         if table == "core.prices_daily" and _missing_table_error(exc, table_name="core.prices_daily"):
@@ -202,6 +302,11 @@ def fetch_ohlcv_daily(
                         volume_col=volume_col,
                         start=start,
                         end=end,
+                        security_table=security_table,
+                        security_id_col=security_id_col,
+                        security_symbol_col=security_symbol_col,
+                        prices_security_id_col=prices_security_id_col,
+                        prices_trade_date_col=prices_trade_date_col,
                     )
                 except Exception as exc2:
                     if _missing_table_error(exc2, table_name=cand):
@@ -225,6 +330,11 @@ def fetch_ohlcv_daily(
                         volume_col=volume_col,
                         start=start,
                         end=end,
+                        security_table=security_table,
+                        security_id_col=security_id_col,
+                        security_symbol_col=security_symbol_col,
+                        prices_security_id_col=prices_security_id_col,
+                        prices_trade_date_col=prices_trade_date_col,
                     )
                 except Exception as exc2:
                     if _missing_table_error(exc2, table_name=cand):
@@ -245,6 +355,11 @@ def fetch_ohlcv_daily(
                 volume_col=volume_col,
                 start=start,
                 end=end,
+                security_table=security_table,
+                security_id_col=security_id_col,
+                security_symbol_col=security_symbol_col,
+                prices_security_id_col=prices_security_id_col,
+                prices_trade_date_col=prices_trade_date_col,
             )
         raise
 
