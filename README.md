@@ -44,6 +44,8 @@ python3 -m pip install psycopg2-binary
 
 ```bash
 export SPRINGEDGE_DB_URL="postgresql://USER:PASSWORD@HOST:5432/DBNAME"
+# Alternatively (common convention):
+export DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DBNAME"
 ```
 
 3) Use it in your script:

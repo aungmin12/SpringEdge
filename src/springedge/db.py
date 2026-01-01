@@ -7,6 +7,7 @@ from typing import Any, Iterator
 from urllib.parse import unquote, urlparse
 
 DEFAULT_DB_URL_ENV = "SPRINGEDGE_DB_URL"
+FALLBACK_DB_URL_ENV = "DATABASE_URL"
 
 
 def get_db_url(db_url: str | None = None, *, env_var: str = DEFAULT_DB_URL_ENV) -> str:
@@ -18,12 +19,19 @@ def get_db_url(db_url: str | None = None, *, env_var: str = DEFAULT_DB_URL_ENV) 
     """
     if db_url and str(db_url).strip():
         return str(db_url).strip()
-    v = os.getenv(env_var, "").strip()
-    if not v:
-        raise ValueError(
-            f"Missing database URL. Provide db_url=... or set env var {env_var}=..."
-        )
-    return v
+    primary = os.getenv(env_var, "").strip()
+    if primary:
+        return primary
+
+    # Common convention in many apps/tooling.
+    fallback = os.getenv(FALLBACK_DB_URL_ENV, "").strip()
+    if fallback:
+        return fallback
+
+    raise ValueError(
+        "Missing database URL. Provide db_url=... or set env var "
+        f"{env_var}=... (or {FALLBACK_DB_URL_ENV}=...)."
+    )
 
 
 def connect_db(db_url: str | None = None, *, env_var: str = DEFAULT_DB_URL_ENV, **kwargs: Any) -> Any:

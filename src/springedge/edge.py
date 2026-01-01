@@ -11,10 +11,20 @@ This module intentionally stays light-weight:
   regime-aware and horizon-aware way.
 """
 
+import os
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 import re
 from typing import Any, Iterable, Literal, Sequence
+
+# Allow running this file directly (e.g. `python3 src/springedge/edge.py`).
+# Recommended invocation remains: `python3 -m springedge.edge`.
+if __name__ == "__main__" and (__package__ is None or __package__ == ""):
+    _pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _pkg_root not in sys.path:
+        sys.path.insert(0, _pkg_root)
+    __package__ = "springedge"
 
 import numpy as np
 import pandas as pd

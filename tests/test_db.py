@@ -7,10 +7,14 @@ from springedge.db import connect_db, db_connection, get_db_url
 
 def test_get_db_url_requires_env_or_param(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SPRINGEDGE_DB_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     with pytest.raises(ValueError):
         get_db_url()
 
     assert get_db_url("sqlite:///:memory:") == "sqlite:///:memory:"
+
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
+    assert get_db_url() == "sqlite:///:memory:"
 
 
 def test_db_connection_sqlite_memory(monkeypatch: pytest.MonkeyPatch) -> None:
