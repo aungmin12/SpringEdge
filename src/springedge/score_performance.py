@@ -26,6 +26,10 @@ except ImportError:
 
 _LOG = logging.getLogger(__name__)
 
+ACTIONABLE_MIN_ABS_SPEARMAN_IC = 0.10
+ACTIONABLE_MIN_IC_IR = 1.5
+ACTIONABLE_MIN_ABS_Q5_MINUS_Q1 = 0.05
+
 
 def _missing_table_error(err: Exception, *, table_name: str) -> bool:
     """
@@ -217,11 +221,11 @@ def fetch_actionable_score_names(
     *,
     table: str = "score_performance_evaluation",
     horizon_days: int = 365,
-    min_abs_spearman_ic: float = 0.10,
-    min_ic_ir: float = 1.5,
-    min_abs_q5_minus_q1: float = 0.05,
+    min_abs_spearman_ic: float = ACTIONABLE_MIN_ABS_SPEARMAN_IC,
+    min_ic_ir: float = ACTIONABLE_MIN_IC_IR,
+    min_abs_q5_minus_q1: float = ACTIONABLE_MIN_ABS_Q5_MINUS_Q1,
     require_all_regimes: bool = True,
-    q5_q1_unit: str = "auto",
+    q5_q1_unit: str = "raw",
 ) -> list[str]:
     """
     Filter `score_name` values by ALL criteria:
@@ -479,20 +483,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Print only actionable score_name values (filters by |spearman_ic|, ic_ir, and |q5-q1| at a horizon).",
     )
     p.add_argument("--horizon-days", type=int, default=365, help="Horizon (days) used for actionable filtering. Default: 365.")
-    p.add_argument("--min-abs-spearman-ic", type=float, default=0.10, help="Actionable threshold A. Default: 0.10.")
-    p.add_argument("--min-ic-ir", type=float, default=1.5, help="Actionable threshold B. Default: 1.5.")
-    p.add_argument(
-        "--min-abs-q5-q1",
-        type=float,
-        default=0.05,
-        help="Actionable threshold C for |q5-q1| (interpreted per --q5-q1-unit). Default: 0.05.",
-    )
-    p.add_argument(
-        "--q5-q1-unit",
-        default="auto",
-        choices=["auto", "raw", "percent_points"],
-        help="How to interpret q5-q1 values: raw (no scaling), percent_points (/100), or auto (heuristic). Default: auto.",
-    )
+    # Intentionally hard-coded actionable thresholds to keep CLI simple.
+    # If you need configurability, call `fetch_actionable_score_names(...)` directly.
     p.add_argument(
         "--any-regime",
         action="store_true",
@@ -534,11 +526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 conn,
                 table=args.table,
                 horizon_days=args.horizon_days,
-                min_abs_spearman_ic=args.min_abs_spearman_ic,
-                min_ic_ir=args.min_ic_ir,
-                min_abs_q5_minus_q1=args.min_abs_q5_q1,
                 require_all_regimes=not args.any_regime,
-                q5_q1_unit=args.q5_q1_unit,
             )
             df = pd.DataFrame({"score_name": scores})
         else:
@@ -558,11 +546,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     conn,
                     table=args.table,
                     horizon_days=args.horizon_days,
-                    min_abs_spearman_ic=args.min_abs_spearman_ic,
-                    min_ic_ir=args.min_ic_ir,
-                    min_abs_q5_minus_q1=args.min_abs_q5_q1,
                     require_all_regimes=not args.any_regime,
-                    q5_q1_unit=args.q5_q1_unit,
                 )
                 df = pd.DataFrame({"score_name": scores})
             else:
