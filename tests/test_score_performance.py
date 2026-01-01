@@ -29,3 +29,63 @@ def test_fetch_actionable_score_names_filters_all_criteria_and_all_regimes():
     out = fetch_actionable_score_names(conn, table="score_performance_evaluation", horizon_days=365)
     assert out == ["alpha"]
 
+
+def test_fetch_actionable_score_names_sql_failure_rolls_back_and_falls_back_to_df():
+    """
+    Regression: if the SQL pushdown path fails on Postgres, psycopg will mark the
+    transaction as aborted until rollback(). The fallback pandas path must still work.
+    """
+
+    class _FakeCursor:
+        def __init__(self, conn: "_FakePsycopgConn") -> None:
+            self._conn = conn
+            self.description = None
+
+        def execute(self, sql: str, params=None) -> None:  # noqa: ANN001 - test stub
+            # First attempt: SQL pushdown fails and aborts txn.
+            if params is not None and not self._conn._attempted_pushdown:
+                self._conn._attempted_pushdown = True
+                self._conn._aborted = True
+                raise RuntimeError("simulated pushdown SQL error")
+
+            # Any query while aborted should raise the typical psycopg behavior.
+            if self._conn._aborted:
+                raise RuntimeError("current transaction is aborted, commands ignored until end of transaction block")
+
+            # Fallback SELECT succeeds.
+            self.description = [
+                ("score_name", None, None, None, None, None, None),
+                ("horizon_days", None, None, None, None, None, None),
+                ("regime_label", None, None, None, None, None, None),
+                ("spearman_ic", None, None, None, None, None, None),
+                ("ic_ir", None, None, None, None, None, None),
+                ("q5_minus_q1", None, None, None, None, None, None),
+            ]
+
+        def fetchall(self):
+            return [
+                ("alpha", 365, "risk_on", 0.12, 1.6, 0.06),
+                ("alpha", 365, "risk_off", 0.11, 1.7, 0.055),
+                ("beta", 365, "risk_on", 0.05, 3.0, 0.20),
+            ]
+
+        def close(self) -> None:
+            return None
+
+    class _FakePsycopgConn:
+        __module__ = "psycopg.connection"
+
+        def __init__(self) -> None:
+            self._aborted = False
+            self._attempted_pushdown = False
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor(self)
+
+        def rollback(self) -> None:
+            self._aborted = False
+
+    conn = _FakePsycopgConn()
+    out = fetch_actionable_score_names(conn, table="score_performance_evaluation", horizon_days=365)
+    assert out == ["alpha"]
+
