@@ -2,7 +2,8 @@
 Convenience wrapper so you can run from repo root:
 
   python3 edge.py --demo
-  python3 edge.py --score-performance --demo
+  # Score-performance is now attempted by default after the Edge run:
+  python3 edge.py --demo
 
 This simply forwards to `springedge.edge.main` while ensuring `src/` is on sys.path.
 Recommended invocation (after install) remains:
@@ -11,6 +12,7 @@ Recommended invocation (after install) remains:
 
 Score performance helper:
 
+  # Run only score-performance (no Edge):
   python3 edge.py --score-performance --demo
   python3 -m springedge.score_performance --demo
 """

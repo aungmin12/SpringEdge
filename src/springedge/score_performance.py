@@ -99,8 +99,17 @@ def fetch_score_name_groups(
         raw = _run_query(_table=table)
     except Exception as exc:
         _safe_rollback()
+        # If the table is missing, fall back to a common schema-qualified name. If both are
+        # missing, return an empty result (this helper should be safe to call from broader
+        # pipelines where the score_performance table may not exist yet).
         if _missing_table_error(exc, table_name=table):
-            raw = _run_query(_table="intelligence.score_performance_evaluation")
+            try:
+                raw = _run_query(_table="intelligence.score_performance_evaluation")
+            except Exception as exc2:
+                _safe_rollback()
+                if _missing_table_error(exc2, table_name="intelligence.score_performance_evaluation"):
+                    return pd.DataFrame(columns=["horizon_days", "regime_label", "n_scores", "score_names"])
+                raise
         else:
             raise
 

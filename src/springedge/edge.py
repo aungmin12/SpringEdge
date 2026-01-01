@@ -919,6 +919,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Run the score_performance CLI instead of the Edge pipeline.",
     )
+    p.add_argument(
+        "--no-score-performance",
+        action="store_true",
+        help="Do not attempt to fetch/print score performance groups after the Edge run.",
+    )
+    p.add_argument(
+        "--score-performance-table",
+        default="score_performance_evaluation",
+        help="Score performance source table. Default: score_performance_evaluation (also tries intelligence.score_performance_evaluation).",
+    )
 
     # DB / baseline / ohlcv
     p.add_argument("--db-url", default=None, help="Database URL (overrides env var if provided).")
@@ -961,6 +971,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     horizon_days = _parse_horizon_days(args.horizon_days)
+
+    score_groups = None
 
     if args.demo:
         import sqlite3
@@ -1021,24 +1033,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             horizon_basis=args.horizon_basis,
             candidates_as_of=args.candidates_as_of,
         )
+        if not args.no_score_performance:
+            try:
+                from .score_performance import fetch_score_name_groups
+
+                score_groups = fetch_score_name_groups(conn, table=args.score_performance_table)
+            except Exception as exc:
+                _LOG.warning("score_performance: skipped (%s)", exc)
     else:
-        out = run_edge(
-            db_url=args.db_url,
-            env_var=args.env_var,
-            baseline_table=args.baseline_table,
-            baseline_symbol_col=args.baseline_symbol_col,
-            baseline_as_of_col=args.baseline_as_of_col,
-            baseline_as_of=args.baseline_as_of,
-            ohlcv_table=args.ohlcv_table,
-            ohlcv_symbol_col=args.ohlcv_symbol_col,
-            ohlcv_date_col=args.ohlcv_date_col,
-            ohlcv_start=args.ohlcv_start,
-            ohlcv_end=args.ohlcv_end,
-            universe=args.universe,
-            horizon_days=horizon_days,
-            horizon_basis=args.horizon_basis,
-            candidates_as_of=args.candidates_as_of,
-        )
+        # Use one DB connection for both Edge + score_performance (when enabled).
+        with db_connection(args.db_url, env_var=args.env_var) as conn:
+            out = run_edge(
+                conn=conn,
+                baseline_table=args.baseline_table,
+                baseline_symbol_col=args.baseline_symbol_col,
+                baseline_as_of_col=args.baseline_as_of_col,
+                baseline_as_of=args.baseline_as_of,
+                ohlcv_table=args.ohlcv_table,
+                ohlcv_symbol_col=args.ohlcv_symbol_col,
+                ohlcv_date_col=args.ohlcv_date_col,
+                ohlcv_start=args.ohlcv_start,
+                ohlcv_end=args.ohlcv_end,
+                universe=args.universe,
+                horizon_days=horizon_days,
+                horizon_basis=args.horizon_basis,
+                candidates_as_of=args.candidates_as_of,
+            )
+            if not args.no_score_performance:
+                try:
+                    from .score_performance import fetch_score_name_groups
+
+                    score_groups = fetch_score_name_groups(conn, table=args.score_performance_table)
+                except Exception as exc:
+                    _LOG.warning("score_performance: skipped (%s)", exc)
 
     if out is None or out.empty:
         _LOG.warning("No candidates returned.")
@@ -1065,6 +1092,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             float_format=lambda x: f"{x:.6f}",
         )
     )
+    if score_groups is not None:
+        try:
+            import json
+
+            payload = [
+                {
+                    "horizon_days": int(row.horizon_days),
+                    "regime_label": str(row.regime_label),
+                    "n_scores": int(row.n_scores),
+                    "score_names": list(row.score_names),
+                }
+                for row in score_groups.itertuples(index=False)
+            ]
+            if payload:
+                print("\nscore_performance_groups=" + json.dumps(payload, indent=2, sort_keys=False))
+        except Exception as exc:
+            _LOG.warning("score_performance: failed to print (%s)", exc)
     return 0
 
 
