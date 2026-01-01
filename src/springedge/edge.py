@@ -906,10 +906,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # repo-root `edge.py` wrapper).
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     if "--score-performance" in argv_list:
-
         from .score_performance import main as _sp_main
-   
-
         forwarded = [a for a in argv_list if a != "--score-performance"]
         return int(_sp_main(forwarded))
 
@@ -931,6 +928,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="score_performance_evaluation",
         help="Score performance source table. Default: score_performance_evaluation (also tries intelligence.score_performance_evaluation).",
     )
+    p.add_argument(
+        "--db-url",
+        default=None,
+        help="Optional DB URL override (otherwise uses env var SPRINGEDGE_DB_URL or DATABASE_URL).",
+    )
+    p.add_argument(
+        "--db-env-var",
+        default="SPRINGEDGE_DB_URL",
+        help="Environment variable to read DB URL from. Default: SPRINGEDGE_DB_URL (also falls back to DATABASE_URL).",
+    )
+
+    # Baseline / layers
+    p.add_argument("--baseline-table", default="sp500", help="Baseline universe table. Default: sp500.")
+    p.add_argument("--baseline-symbol-col", default="symbol", help="Baseline symbol column. Default: symbol.")
+    p.add_argument(
+        "--baseline-as-of-col",
+        default="date",
+        help="Baseline 'as of' date column (use ''/none to disable). Default: date.",
+    )
+    p.add_argument("--baseline-as-of", default=None, help="Baseline as-of date filter (inclusive). Default: latest snapshot.")
+
+    # OHLCV
+    p.add_argument("--ohlcv-table", default="core.prices_daily", help="OHLCV source table. Default: core.prices_daily.")
     p.add_argument("--ohlcv-symbol-col", default="symbol")
     p.add_argument("--ohlcv-date-col", default="date")
     p.add_argument("--ohlcv-start", default=None, help="OHLCV start date filter (inclusive).")
@@ -967,6 +987,84 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     score_groups = None
 
+    baseline_as_of_col = str(args.baseline_as_of_col or "").strip()
+    if baseline_as_of_col.lower() in {"", "none", "null"}:
+        baseline_as_of_col = None  # type: ignore[assignment]
+
+    def _run_and_print(conn: Any) -> int:
+        nonlocal score_groups
+        out = run_edge(
+            conn=conn,
+            baseline_table=args.baseline_table,
+            baseline_symbol_col=args.baseline_symbol_col,
+            baseline_as_of_col=baseline_as_of_col,  # type: ignore[arg-type]
+            baseline_as_of=args.baseline_as_of,
+            ohlcv_table=args.ohlcv_table,
+            ohlcv_symbol_col=args.ohlcv_symbol_col,
+            ohlcv_date_col=args.ohlcv_date_col,
+            ohlcv_start=args.ohlcv_start,
+            ohlcv_end=args.ohlcv_end,
+            universe=args.universe,
+            horizon_days=horizon_days,
+            horizon_basis=args.horizon_basis,
+            candidates_as_of=args.candidates_as_of,
+        )
+
+        if not args.no_score_performance:
+            try:
+                from .score_performance import fetch_score_name_groups
+
+                score_groups = fetch_score_name_groups(conn, table=args.score_performance_table)
+            except Exception as exc:
+                _LOG.warning("score_performance: skipped (%s)", exc)
+
+        shown = out if not args.top else out.head(int(args.top))
+        if shown.empty:
+            print("(no candidates)")
+            return 0
+
+        # Keep the CLI output compact and stable.
+        with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 200):
+            print(shown.to_string(index=False))
+        if score_groups:
+            print("\nScore performance groups:")
+            for k in sorted(score_groups.keys()):
+                print(f"- {k}: {len(score_groups[k])} scores")
+        return 0
+
+    if args.demo:
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        # sqlite schema-qualification requires ATTACH for `core.<table>` style names.
+        conn.execute("ATTACH DATABASE ':memory:' AS core")
+        conn.execute("create table sp500 (date text, symbol text)")
+        conn.execute(
+            "create table core.prices_daily (symbol text, date text, open real, high real, low real, close real, volume real)"
+        )
+        conn.execute(
+            """
+            create table market_regime_daily (
+              analysis_date text,
+              regime_label text,
+              regime_score real,
+              position_multiplier real,
+              vix_level real,
+              vix_zscore real,
+              vix9d_over_vix real,
+              vix_vix3m_ratio real,
+              move_level real,
+              move_zscore real,
+              term_structure_state text,
+              event_risk_flag integer,
+              joint_stress_flag integer,
+              notes text,
+              created_at text
+            )
+            """
+        )
+
+        # Baseline snapshot (latest = 2024-02-01).
         conn.executemany(
             "insert into sp500 (date, symbol) values (?, ?)",
             [
@@ -976,6 +1074,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ("2024-02-01", "BBB"),
             ],
         )
+
+        # Simple synthetic OHLCV for both symbols.
         dates = pd.bdate_range("2023-01-02", periods=320)
         for sym, base in [("AAA", 100.0), ("BBB", 50.0)]:
             close = base * np.exp(np.cumsum(np.full(len(dates), 0.001)))
@@ -998,27 +1098,54 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "insert into core.prices_daily (symbol, date, open, high, low, close, volume) values (?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
-        out = run_edge(
-            conn=conn,
-            baseline_table=args.baseline_table,
-            baseline_symbol_col=args.baseline_symbol_col,
-            baseline_as_of_col=args.baseline_as_of_col,
-            baseline_as_of=args.baseline_as_of or "2024-02-01",
-            ohlcv_table=args.ohlcv_table,
-            ohlcv_symbol_col=args.ohlcv_symbol_col,
-            ohlcv_date_col=args.ohlcv_date_col,
-            ohlcv_start=args.ohlcv_start,
-            ohlcv_end=args.ohlcv_end,
-            universe=args.universe,
-            horizon_days=horizon_days or (7, 21),
-            horizon_basis=args.horizon_basis,
-            candidates_as_of=args.candidates_as_of,
+
+        # Provide a market regime row for the last OHLCV date so the pipeline can join it.
+        last_date = dates[-1].date().isoformat()
+        conn.execute(
+            """
+            insert into market_regime_daily (
+              analysis_date, regime_label, regime_score, position_multiplier,
+              vix_level, vix_zscore, vix9d_over_vix, vix_vix3m_ratio,
+              move_level, move_zscore, term_structure_state, event_risk_flag,
+              joint_stress_flag, notes, created_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                last_date,
+                "market_risk_on",
+                1.23,
+                1.0,
+                15.0,
+                0.1,
+                0.9,
+                0.8,
+                100.0,
+                -0.2,
+                "normal",
+                0,
+                0,
+                None,
+                last_date,
+            ),
         )
-        if not args.no_score_performance:
+
+        # Demo defaults.
+        if args.baseline_as_of is None:
+            args.baseline_as_of = "2024-02-01"
+        if horizon_days is None:
+            horizon_days = (7, 21)
+
+        try:
+            return _run_and_print(conn)
+        finally:
             try:
-                from .score_performance import fetch_score_name_groups
+                conn.close()
+            except Exception:
+                pass
 
-                score_groups = fetch_score_name_groups(conn, table=args.score_performance_table)
-            except Exception as exc:
-                _LOG.warning("score_performance: skipped (%s)", exc)
+    with db_connection(args.db_url, env_var=args.db_env_var) as conn:
+        return _run_and_print(conn)
 
+
+if __name__ == "__main__":
+    raise SystemExit(main())
