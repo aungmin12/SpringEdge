@@ -6,5 +6,6 @@ Primary entrypoint:
 """
 
 from .features import compute_edge_features
+from .layers import StockUniverse
 
-__all__ = ["compute_edge_features"]
+__all__ = ["compute_edge_features", "StockUniverse"]

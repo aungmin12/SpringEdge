@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Literal
 
 import numpy as np
 import pandas as pd
 
 from . import indicators as ind
+from .layers import calendar_days_to_trading_days
 
 
 @dataclass(frozen=True)
@@ -69,12 +70,60 @@ def _risk_on_flag(trend: pd.Series) -> pd.Series:
     return pd.Series(np.where(trend.isna(), np.nan, np.where(trend > 0, 1.0, 0.0)), index=trend.index)
 
 
+def _regime_label(vol_regime: pd.Series, risk_on_off: pd.Series) -> pd.Series:
+    vol_map = {0.0: "low_vol", 1.0: "mid_vol", 2.0: "high_vol"}
+    risk_map = {0.0: "risk_off", 1.0: "risk_on"}
+
+    vol_lbl = vol_regime.map(vol_map)
+    risk_lbl = risk_on_off.map(risk_map)
+    return (risk_lbl.astype("string") + "_" + vol_lbl.astype("string")).where(
+        vol_regime.notna() & risk_on_off.notna(), other=pd.NA
+    )
+
+
+def _derive_horizons(
+    horizon_days: Iterable[int],
+    *,
+    basis: Literal["trading", "calendar"],
+    trading_days_per_year: int,
+) -> list[tuple[int, int]]:
+    """
+    Returns list of (label_days, lookback_trading_days).
+    - label_days: what the user asked for (used in column naming as '{label_days}d')
+    - lookback_trading_days: what we compute with in the price series
+    """
+
+    out: list[tuple[int, int]] = []
+    for d in horizon_days:
+        if int(d) <= 0:
+            raise ValueError("horizon_days must be positive integers")
+        label_days = int(d)
+        if basis == "trading":
+            lb = label_days
+        else:
+            lb = calendar_days_to_trading_days(label_days, trading_days_per_year=trading_days_per_year)
+        out.append((label_days, lb))
+    # preserve input order, but de-dupe exact pairs
+    seen: set[tuple[int, int]] = set()
+    deduped: list[tuple[int, int]] = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            deduped.append(x)
+    return deduped
+
+
 def compute_edge_features(
     ohlcv: pd.DataFrame,
     *,
     symbol_col: str = "symbol",
     date_col: str = "date",
+    universe: str | None = None,
+    universe_col: str = "universe",
     config: EdgeFeatureConfig | None = None,
+    # Optional: override horizons to create an explicit "Time Horizons" layer
+    horizon_days: tuple[int, ...] | None = None,
+    horizon_basis: Literal["trading", "calendar"] = "trading",
     # Optional proxy inputs (aligned on symbol/date). Any missing columns => produced as NaN.
     proxies: pd.DataFrame | None = None,
     proxy_cols: Iterable[str] = ("revisions", "breadth", "price_action_proxy"),
@@ -111,6 +160,12 @@ def compute_edge_features(
     cfg = config or EdgeFeatureConfig()
     _validate_ohlcv_frame(ohlcv, symbol_col=symbol_col, date_col=date_col)
     base = _coerce_and_sort(ohlcv, symbol_col=symbol_col, date_col=date_col)
+    if universe_col not in base.columns:
+        base[universe_col] = universe
+    else:
+        # respect any pre-existing values, but allow a global override when explicitly provided
+        if universe is not None:
+            base[universe_col] = universe
 
     # Join optional frames
     def _left_join_optional(left: pd.DataFrame, right: pd.DataFrame | None) -> pd.DataFrame:
@@ -131,6 +186,10 @@ def compute_edge_features(
         if c not in base.columns:
             base[c] = np.nan
 
+    horizons: list[tuple[int, int]] | None = None
+    if horizon_days is not None:
+        horizons = _derive_horizons(horizon_days, basis=horizon_basis, trading_days_per_year=cfg.trading_days)
+
     def per_symbol(g: pd.DataFrame, sym: str) -> pd.DataFrame:
         g = g.sort_values(date_col).copy()
         g[symbol_col] = sym
@@ -144,13 +203,18 @@ def compute_edge_features(
 
         # --- Tactical: momentum + trend
         trend = ind.trend_ma_cross(g["close"], fast=cfg.risk_on_trend_fast, slow=cfg.risk_on_trend_slow)
-        for lb in cfg.mom_lookbacks:
-            g[f"mom_ret_{lb}"] = ind.momentum_return(g["close"], lb)
+        if horizons is None:
+            for lb in cfg.mom_lookbacks:
+                g[f"mom_ret_{lb}"] = ind.momentum_return(g["close"], lb)
+        else:
+            for label_days, lb in horizons:
+                g[f"mom_ret_{label_days}d"] = ind.momentum_return(g["close"], lb)
         g["trend_ma_50_200"] = trend
 
         # --- Regime: vol regime + risk-on/off + regime_id
         vol_regime = _vol_regime_id(ann_vol_20d, cfg.vol_regime_low_q, cfg.vol_regime_high_q)
         risk_on_off = _risk_on_flag(trend)
+        regime = _regime_label(vol_regime, risk_on_off)
         # Combine into a compact regime id: 10*vol_regime + risk_on_off
         regime_id = np.where(
             np.isnan(vol_regime) | np.isnan(risk_on_off),
@@ -164,6 +228,7 @@ def compute_edge_features(
         g["liquidity"] = liquidity
         g["vol_regime"] = vol_regime
         g["risk_on_off"] = risk_on_off
+        g["regime"] = regime
         g["regime_id"] = regime_id
 
         # --- Structural (Nonuple) + composites
@@ -188,8 +253,12 @@ def compute_edge_features(
         g["price_action_proxy"] = pd.to_numeric(g["price_action_proxy"], errors="coerce")
 
         # --- Forward returns
-        for h in cfg.fwd_horizons:
-            g[f"fwd_ret_{h}"] = ind.forward_return(g["close"], h)
+        if horizons is None:
+            for h in cfg.fwd_horizons:
+                g[f"fwd_ret_{h}"] = ind.forward_return(g["close"], h)
+        else:
+            for label_days, lb in horizons:
+                g[f"fwd_ret_{label_days}d"] = ind.forward_return(g["close"], lb)
 
         return g
 
@@ -201,7 +270,7 @@ def compute_edge_features(
     out = pd.concat(parts, ignore_index=True)
 
     # Final column ordering: keep original keys first, then feature families
-    base_cols = [symbol_col, date_col, *REQUIRED_OHLCV_COLS]
+    base_cols = [symbol_col, universe_col, date_col, *REQUIRED_OHLCV_COLS]
     feature_cols = [c for c in out.columns if c not in base_cols and c not in set(nonuple_cols)]
     out = out[base_cols + feature_cols]
     return out

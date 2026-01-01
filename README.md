@@ -5,11 +5,20 @@ Minimal "Edge system" feature generation.
 ## What it outputs
 
 Per `symbol` / `date`, it generates:
+- **Universe**: `universe` (optional tag you provide; e.g. `sp500`, `penny`, `other`)
 - **Regime**: `regime_id`, `risk_on_off`, `vol_regime`
+- **Regime label**: `regime` (e.g. `risk_on_low_vol`)
 - **Structural**: `nonuple_*` (placeholders if you don't provide fundamentals) + composites (`struct_core`, `struct_growth_quality`, `struct_value_quality`)
 - **Tactical**: momentum returns (`mom_ret_21/63/126`), trend (`trend_ma_50_200`), catalyst/proxies passthrough (`revisions`, `breadth`, `price_action_proxy`)
 - **Risk**: `atr14`, `ann_vol_20d`, `drawdown`, `liquidity`, `leverage_flag` (placeholder)
 - **Forward returns**: `fwd_ret_21/63/126/252`
+
+## “3 top layers” support
+
+You can organize your analysis along:
+- **Stock Universe (Base)**: pass `universe="sp500"` (or use `StockUniverse.SP500`)
+- **Time Horizons**: pass `horizon_days=(7, 21, 30, 60, 90, 180, 365)` and choose `horizon_basis="calendar"` (or `"trading"`)
+- **Regime**: use `regime` / `regime_id` / `risk_on_off` / `vol_regime`
 
 ## Quickstart
 
