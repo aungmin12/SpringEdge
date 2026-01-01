@@ -1,6 +1,29 @@
 from __future__ import annotations
 
-from enum import StrEnum
+try:
+    # Python 3.11+
+    from enum import StrEnum
+except ImportError:  # pragma: no cover (only hit on Python < 3.11)
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        """
+        Backport of `enum.StrEnum` for Python < 3.11.
+
+        This is sufficient for our use-case (string-valued enums for stable tags).
+        """
+
+        def __str__(self) -> str:  # matches stdlib behavior
+            return str(self.value)
+
+        @classmethod
+        def _missing_(cls, value: object) -> "StrEnum | None":
+            # Allow construction from raw string values: StockUniverse("sp500")
+            if isinstance(value, str):
+                for m in cls:
+                    if m.value == value:
+                        return m
+            return None
 import re
 from datetime import date, datetime
 from typing import Any
