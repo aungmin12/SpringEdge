@@ -106,6 +106,112 @@ def _normalize_spread_units(x: pd.Series, *, unit: str = "auto") -> pd.Series:
     raise ValueError(f"Unknown q5-q1 spread unit: {unit!r} (expected 'raw', 'percent_points', or 'auto').")
 
 
+def _fetch_actionable_score_names_sql(
+    conn: Any,
+    *,
+    table: str,
+    horizon_days: int,
+    min_abs_spearman_ic: float,
+    min_ic_ir: float,
+    min_abs_q5_minus_q1: float,
+    require_all_regimes: bool,
+    q5_q1_unit: str,
+) -> list[str] | None:
+    """
+    Best-effort SQL pushdown for actionable filtering.
+
+    Returns:
+      - list[str] on success
+      - None if we cannot/should not use SQL (unknown unit, unsupported SQL, etc.)
+
+    Notes:
+    - This intentionally avoids Postgres-only aggregates like bool_and/bool_or by using
+      numeric aggregation over a CASE expression (portable across many DBs).
+    - We only use this when q5-q1 units are explicit ("raw" or "percent_points").
+      For "auto", we fall back to the pandas path because it relies on heuristics.
+    """
+    unit = str(q5_q1_unit or "auto").strip().lower()
+    if unit == "auto":
+        return None
+    if unit == "raw":
+        scale = 1.0
+    elif unit in {"percent_points", "pct_points", "pp"}:
+        # stored as percent points, normalize to decimals
+        scale = 0.01
+    else:
+        return None
+
+    t = _validate_table_ref(table, kind="table")
+
+    # Portable aggregation:
+    # - ALL regimes: MIN(passed_int) = 1
+    # - ANY regime: MAX(passed_int) = 1
+    agg = "MIN" if require_all_regimes else "MAX"
+
+    sql = f"""
+    WITH per_row AS (
+      SELECT
+        score_name,
+        CASE
+          WHEN ABS(spearman_ic) >= %s
+           AND ic_ir >= %s
+           AND ABS(q5_minus_q1 * %s) >= %s
+          THEN 1 ELSE 0
+        END AS passed_int
+      FROM {t}
+      WHERE horizon_days = %s
+        AND score_name IS NOT NULL
+    )
+    SELECT score_name
+    FROM per_row
+    GROUP BY score_name
+    HAVING {agg}(passed_int) = 1
+    ORDER BY score_name
+    """
+
+    params = (
+        float(min_abs_spearman_ic),
+        float(min_ic_ir),
+        float(scale),
+        float(min_abs_q5_minus_q1),
+        int(horizon_days),
+    )
+
+    cur = conn.cursor()
+    try:
+        try:
+            cur.execute(sql, params)
+        except TypeError:
+            # Some drivers (or sqlite) use qmark paramstyle; if so, we can't safely
+            # attempt a generic rewrite here. Fall back to pandas path.
+            try:
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+            except Exception:
+                pass
+            return None
+        except Exception:
+            try:
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+            except Exception:
+                pass
+            return None
+        rows = cur.fetchall()
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    out: list[str] = []
+    for r in rows:
+        if not r:
+            continue
+        out.append(str(r[0]))
+    return out
+
+
 def fetch_actionable_score_names(
     conn: Any,
     *,
@@ -132,6 +238,21 @@ def fetch_actionable_score_names(
     If `require_all_regimes=True`, a score is actionable only if it passes the criteria
     for every row (typically each regime_label) at the given horizon_days.
     """
+    # If the caller provides explicit spread units, we can push the whole filter
+    # into SQL for speed and simplicity (and avoid loading the entire table).
+    sql_res = _fetch_actionable_score_names_sql(
+        conn,
+        table=table,
+        horizon_days=horizon_days,
+        min_abs_spearman_ic=min_abs_spearman_ic,
+        min_ic_ir=min_ic_ir,
+        min_abs_q5_minus_q1=min_abs_q5_minus_q1,
+        require_all_regimes=require_all_regimes,
+        q5_q1_unit=q5_q1_unit,
+    )
+    if sql_res is not None:
+        return sorted(set(map(str, sql_res)))
+
     # Load from configured table, but fall back to intelligence.* and return empty if missing.
     try:
         df = _load_table_as_df(conn, table=table)
