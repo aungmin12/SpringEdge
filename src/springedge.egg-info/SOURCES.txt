@@ -8,6 +8,7 @@ src/springedge/edge.py
 src/springedge/features.py
 src/springedge/indicators.py
 src/springedge/layers.py
+src/springedge/logging_utils.py
 src/springedge/regime.py
 src/springedge/schemas.py
 src/springedge/score_performance.py
