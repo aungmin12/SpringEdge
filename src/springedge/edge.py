@@ -199,6 +199,77 @@ def fetch_ohlcv_daily(
     try:
         return _fetch_df(sql, params)
     except Exception as exc:
+        # Compatibility: some schemas use different column names for ticker/date.
+        # Common example: `ticker` instead of `symbol` in a `prices_daily` table.
+        #
+        # We only attempt these aliases when the caller is using the defaults
+        # (`symbol`/`date`). If the caller explicitly overrides, we assume they
+        # know their schema and avoid endless retry loops.
+        def _try_fetch_with_column_aliases() -> pd.DataFrame | None:
+            sym_missing = _missing_column_error(exc, column_name=symbol_col)
+            date_missing = _missing_column_error(exc, column_name=date_col)
+            if not (sym_missing or date_missing):
+                return None
+
+            sym_aliases: tuple[str, ...] = ()
+            if sym_missing and symbol_col == "symbol":
+                sym_aliases = ("ticker", "sym", "tsym", "ticker_symbol")
+
+            date_aliases: tuple[str, ...] = ()
+            if date_missing and date_col == "date":
+                date_aliases = ("trade_date", "dt", "asof_date")
+
+            if not sym_aliases and not date_aliases:
+                return None
+
+            # Try combinations, but keep the original values first.
+            sym_candidates = (symbol_col,) + sym_aliases
+            date_candidates = (date_col,) + date_aliases
+
+            last_exc: Exception | None = None
+            for symc2 in sym_candidates:
+                for dc2 in date_candidates:
+                    # Skip the exact same pair.
+                    if symc2 == symbol_col and dc2 == date_col:
+                        continue
+                    try:
+                        return fetch_ohlcv_daily(
+                            conn,
+                            symbols=symbols,
+                            table=table,
+                            symbol_col=symc2,
+                            date_col=dc2,
+                            open_col=open_col,
+                            high_col=high_col,
+                            low_col=low_col,
+                            close_col=close_col,
+                            volume_col=volume_col,
+                            start=start,
+                            end=end,
+                            security_table=security_table,
+                            security_id_col=security_id_col,
+                            security_symbol_col=security_symbol_col,
+                            prices_security_id_col=prices_security_id_col,
+                            prices_trade_date_col=prices_trade_date_col,
+                        )
+                    except Exception as exc2:
+                        last_exc = exc2
+                        # If we still have missing column errors, keep trying.
+                        if symc2 != symbol_col and _missing_column_error(exc2, column_name=symc2):
+                            continue
+                        if dc2 != date_col and _missing_column_error(exc2, column_name=dc2):
+                            continue
+                        # For other errors (or mismatches), stop early.
+                        break
+                else:
+                    continue
+                break
+
+            if last_exc is not None:
+                # Don't hide unexpected errors; return None so outer handler can proceed.
+                return None
+            return None
+
         # Compatibility: if the target table doesn't have the assumed column names,
         # retry a common production schema:
         # - prices table: security_id + trade_date
@@ -278,6 +349,11 @@ def fetch_ohlcv_daily(
                 conn.rollback()
         except Exception:
             pass
+
+        # Next, try common "ticker/date" alias columns on the same prices table.
+        aliased = _try_fetch_with_column_aliases()
+        if aliased is not None:
+            return aliased
 
         # First, try the joined-security compatibility path.
         joined = _try_fetch_joined_security()

@@ -72,3 +72,59 @@ def test_run_edge_end_to_end_sqlite_baseline_to_scored_candidates():
     assert "edge_score" in out.columns
     assert any(c.startswith("ind_z_") for c in out.columns)
 
+
+def test_run_edge_end_to_end_sqlite_ohlcv_with_ticker_column_fallbacks():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("ATTACH DATABASE ':memory:' AS core")
+    conn.execute("create table sp500 (date text, symbol text)")
+    # Common production variant: ticker column instead of symbol.
+    conn.execute(
+        "create table core.prices_daily (ticker text, date text, open real, high real, low real, close real, volume real)"
+    )
+
+    # Baseline snapshot (latest = 2024-02-01).
+    conn.executemany(
+        "insert into sp500 (date, symbol) values (?, ?)",
+        [
+            ("2024-01-02", "AAA"),
+            ("2024-01-02", "BBB"),
+            ("2024-02-01", "AAA"),
+            ("2024-02-01", "BBB"),
+        ],
+    )
+
+    # Simple synthetic OHLCV for both symbols.
+    dates = pd.bdate_range("2023-01-02", periods=320)
+    for sym, base in [("AAA", 100.0), ("BBB", 50.0)]:
+        close = base * np.exp(np.cumsum(np.full(len(dates), 0.001)))
+        open_ = np.r_[close[0], close[:-1]]
+        high = np.maximum(open_, close) * 1.01
+        low = np.minimum(open_, close) * 0.99
+        vol = np.full(len(dates), 1_000_000.0)
+        rows = list(
+            zip(
+                [sym] * len(dates),
+                [d.date().isoformat() for d in dates],
+                open_.astype(float),
+                high.astype(float),
+                low.astype(float),
+                close.astype(float),
+                vol.astype(float),
+            )
+        )
+        conn.executemany(
+            "insert into core.prices_daily (ticker, date, open, high, low, close, volume) values (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+
+    out = run_edge(
+        conn=conn,
+        baseline_as_of="2024-02-01",
+        horizon_days=(7, 21),
+        horizon_basis="trading",
+    )
+
+    assert out["symbol"].tolist() == ["AAA", "BBB"]
+    assert out["date"].notna().all()
+    assert "edge_score" in out.columns
+
