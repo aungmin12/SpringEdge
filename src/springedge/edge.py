@@ -923,7 +923,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p.add_argument("--horizon-basis", choices=("trading", "calendar"), default="trading")
     p.add_argument("--candidates-as-of", default=None, help="Build one row per symbol as-of this date.")
-    p.add_argument("--top", type=int, default=25, help="How many candidates to print. Default: 25.")
+    p.add_argument(
+        "--top",
+        type=int,
+        default=0,
+        help="How many candidates to print (0 = all). Default: 0.",
+    )
     args = p.parse_args(list(argv) if argv is not None else None)
 
     level = getattr(logging, str(args.log_level).upper(), logging.INFO)
@@ -1026,7 +1031,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Add momentum columns if present (nice quick signal).
     cols += [c for c in view.columns if c.startswith("mom_ret_")]
     cols = list(dict.fromkeys(cols))  # stable de-dupe
-    print(view.loc[: max(args.top - 1, 0), cols].to_string(index=False))
+
+    if args.top and args.top > 0:
+        printable = view.head(args.top)
+    else:
+        printable = view
+
+    print(
+        printable.loc[:, cols].to_string(
+            index=False,
+            float_format=lambda x: f"{x:.6f}",
+        )
+    )
     return 0
 
 
