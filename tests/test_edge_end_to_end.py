@@ -231,3 +231,118 @@ def test_run_edge_end_to_end_sqlite_ohlcv_with_ticker_column_fallbacks():
     assert out["date"].notna().all()
     assert "edge_score" in out.columns
     assert out["regime"].tolist() == ["market_risk_off", "market_risk_off"]
+
+
+def test_run_edge_end_to_end_with_topdown_evaluation():
+    import sqlite3
+
+    import numpy as np
+    import pandas as pd
+
+    from springedge import TopDownEvaluation, run_edge
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("ATTACH DATABASE ':memory:' AS core")
+    conn.execute("create table sp500 (date text, symbol text)")
+    conn.execute(
+        "create table core.prices_daily (symbol text, date text, open real, high real, low real, close real, volume real)"
+    )
+    conn.execute(
+        """
+        create table market_regime_daily (
+          analysis_date text,
+          regime_label text,
+          regime_score real,
+          position_multiplier real,
+          vix_level real,
+          vix_zscore real,
+          vix9d_over_vix real,
+          vix_vix3m_ratio real,
+          move_level real,
+          move_zscore real,
+          term_structure_state text,
+          event_risk_flag integer,
+          joint_stress_flag integer,
+          notes text,
+          created_at text
+        )
+        """
+    )
+
+    conn.executemany(
+        "insert into sp500 (date, symbol) values (?, ?)",
+        [("2024-02-01", "AAA"), ("2024-02-01", "BBB")],
+    )
+
+    dates = pd.bdate_range("2023-01-02", periods=320)
+    for sym, base in [("AAA", 100.0), ("BBB", 50.0)]:
+        close = base * np.exp(np.cumsum(np.full(len(dates), 0.001)))
+        open_ = np.r_[close[0], close[:-1]]
+        high = np.maximum(open_, close) * 1.01
+        low = np.minimum(open_, close) * 0.99
+        vol = np.full(len(dates), 1_000_000.0)
+        rows = list(
+            zip(
+                [sym] * len(dates),
+                [d.date().isoformat() for d in dates],
+                open_.astype(float),
+                high.astype(float),
+                low.astype(float),
+                close.astype(float),
+                vol.astype(float),
+            )
+        )
+        conn.executemany(
+            "insert into core.prices_daily (symbol, date, open, high, low, close, volume) values (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+
+    last_date = dates[-1].date().isoformat()
+    conn.execute(
+        """
+        insert into market_regime_daily (
+          analysis_date, regime_label, regime_score, position_multiplier,
+          vix_level, vix_zscore, vix9d_over_vix, vix_vix3m_ratio,
+          move_level, move_zscore, term_structure_state, event_risk_flag,
+          joint_stress_flag, notes, created_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            last_date,
+            "market_risk_on",
+            1.0,
+            1.0,
+            15.0,
+            0.0,
+            1.0,
+            1.0,
+            100.0,
+            0.0,
+            "normal",
+            0,
+            0,
+            None,
+            last_date,
+        ),
+    )
+
+    out = run_edge(
+        conn=conn,
+        baseline_as_of="2024-02-01",
+        # Ensure the horizon features exist for the top-down layers.
+        horizon_days=(7, 21, 30, 63, 126, 365),
+        horizon_basis="calendar",
+        evaluation=TopDownEvaluation(),
+    )
+
+    assert "edge_score" in out.columns
+    assert "edge_score_topdown" in out.columns
+    assert "topdown_gate" in out.columns
+    for c in [
+        "layer_z_quality_365",
+        "layer_z_structural_63_126",
+        "layer_z_confirm_30",
+        "layer_z_trigger_21",
+        "layer_z_micro_7",
+    ]:
+        assert c in out.columns

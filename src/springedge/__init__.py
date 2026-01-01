@@ -13,8 +13,11 @@ from typing import Any
 __all__ = [
     "compute_edge_features",
     "EdgeEvaluation",
+    "TopDownEvaluation",
+    "TopDownRegimeRule",
     "IndicatorSpec",
     "apply_indicators_to_candidates",
+    "apply_topdown_to_candidates",
     "build_candidate_list",
     "default_edge_evaluation",
     "fetch_ohlcv_daily",
@@ -40,11 +43,14 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "compute_edge_features": ("springedge.features", "compute_edge_features"),
     # edge
     "EdgeEvaluation": ("springedge.edge", "EdgeEvaluation"),
+    "TopDownEvaluation": ("springedge.edge", "TopDownEvaluation"),
+    "TopDownRegimeRule": ("springedge.edge", "TopDownRegimeRule"),
     "IndicatorSpec": ("springedge.edge", "IndicatorSpec"),
     "apply_indicators_to_candidates": (
         "springedge.edge",
         "apply_indicators_to_candidates",
     ),
+    "apply_topdown_to_candidates": ("springedge.edge", "apply_topdown_to_candidates"),
     "build_candidate_list": ("springedge.edge", "build_candidate_list"),
     "default_edge_evaluation": ("springedge.edge", "default_edge_evaluation"),
     "fetch_ohlcv_daily": ("springedge.edge", "fetch_ohlcv_daily"),

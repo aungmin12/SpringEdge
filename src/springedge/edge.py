@@ -15,7 +15,7 @@ import argparse
 import logging
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Literal, Sequence
 
@@ -552,6 +552,66 @@ class EdgeEvaluation:
     indicators: tuple[IndicatorSpec, ...] = ()
 
 
+@dataclass(frozen=True)
+class TopDownRegimeRule:
+    """
+    Regime-specific configuration for top-down horizon integration.
+
+    Intended interpretation (your roles):
+    - 365D: Business quality
+    - 63–126D: Structural momentum
+    - 30D: Trend-continuation confirmation
+    - 21D: Tactical trigger
+    - 7D: Micro timing / noise
+    """
+
+    # Relative weights applied to layer z-scores.
+    weight_quality_365: float = 1.0
+    weight_structural_63_126: float = 1.0
+    weight_confirm_30: float = 1.0
+    weight_trigger_21: float = 1.0
+    weight_micro_7: float = 0.5
+
+    # How to interpret 7D micro timing:
+    # - "follow": positive micro momentum helps (trend-following entry)
+    # - "pullback": negative micro momentum helps (buy weakness in uptrend)
+    # - "ignore": do not use micro layer
+    micro_mode: Literal["follow", "pullback", "ignore"] = "pullback"
+
+    # Soft gating strength. Higher => long-horizon layers gate short-horizon layers more.
+    gate_strength: float = 1.0
+
+
+@dataclass(frozen=True)
+class TopDownEvaluation:
+    """
+    A regime-aware, top-down (365→…→7) evaluation model.
+
+    Pass this to `run_edge(..., evaluation=TopDownEvaluation(...))`.
+    """
+
+    regime_aware: bool = True
+
+    # 365D business quality proxy columns (structural/fundamental composites).
+    quality_cols: tuple[str, ...] = (
+        "struct_core",
+        "struct_growth_quality",
+        "struct_value_quality",
+    )
+
+    # Horizon roles expressed in *day labels* that correspond to feature columns:
+    # - `mom_ret_{N}d` when `horizon_days` is used
+    # - or `mom_ret_{N}` for the built-in defaults (21/63/126)
+    micro_days: tuple[int, ...] = (7,)
+    trigger_days: tuple[int, ...] = (21,)
+    confirm_days: tuple[int, ...] = (30,)
+    structural_days: tuple[int, ...] = (63, 126)
+
+    # Default rule + optional overrides by regime label.
+    default_rule: TopDownRegimeRule = field(default_factory=TopDownRegimeRule)
+    regime_rules: dict[str, TopDownRegimeRule] = field(default_factory=dict)
+
+
 def default_edge_evaluation(
     *,
     horizon_days: tuple[int, ...] | None = None,
@@ -596,12 +656,173 @@ def _zscore(x: pd.Series) -> pd.Series:
     return (s - mu) / sig
 
 
+def _sigmoid(x: pd.Series | float) -> pd.Series | float:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def _pick_mom_col(df: pd.DataFrame, day_label: int) -> str | None:
+    """
+    Prefer custom-horizon naming `mom_ret_{N}d`, fall back to default naming `mom_ret_{N}`.
+    """
+    d = int(day_label)
+    c1 = f"mom_ret_{d}d"
+    if c1 in df.columns:
+        return c1
+    c2 = f"mom_ret_{d}"
+    if c2 in df.columns:
+        return c2
+    return None
+
+
+def _groupwise_zscore(df: pd.DataFrame, col: str, keys: list[str]) -> pd.Series:
+    if not keys:
+        return _zscore(df[col]).astype("float64")
+    return (
+        df.groupby(keys, dropna=False, sort=False)[col]
+        .transform(_zscore)
+        .astype("float64")
+    )
+
+
+def apply_topdown_to_candidates(
+    candidates: pd.DataFrame,
+    *,
+    date_col: str = "date",
+    regime_col: str = "regime",
+    evaluation: TopDownEvaluation | None = None,
+) -> pd.DataFrame:
+    """
+    Apply a top-down, regime-aware multi-horizon scoring model.
+
+    Adds:
+    - `layer_z_quality_365`
+    - `layer_z_structural_63_126`
+    - `layer_z_confirm_30`
+    - `layer_z_trigger_21`
+    - `layer_z_micro_7`
+    - `topdown_gate`
+    - `edge_score_topdown`
+    """
+    if candidates.empty:
+        out = candidates.copy()
+        out["edge_score_topdown"] = pd.Series(dtype="float64")
+        return out
+
+    ev = evaluation or TopDownEvaluation()
+    out = candidates.copy()
+
+    keys: list[str] = []
+    if date_col in out.columns:
+        keys.append(date_col)
+    if ev.regime_aware and regime_col in out.columns:
+        keys.append(regime_col)
+
+    # --- 365D "business quality" (structural / fundamental proxies)
+    qcols = [c for c in ev.quality_cols if c in out.columns]
+    if qcols:
+        out["_raw_quality_365"] = out[qcols].mean(axis=1)
+        out["layer_z_quality_365"] = _groupwise_zscore(out, "_raw_quality_365", keys)
+    else:
+        out["layer_z_quality_365"] = np.nan
+
+    # --- Helper to build horizon layers from momentum columns
+    def _build_mom_layer(days: tuple[int, ...], *, out_col: str) -> None:
+        cols: list[str] = []
+        for d in days:
+            c = _pick_mom_col(out, d)
+            if c is not None:
+                cols.append(c)
+        if not cols:
+            out[out_col] = np.nan
+            return
+        out[f"_raw_{out_col}"] = out[cols].mean(axis=1)
+        out[out_col] = _groupwise_zscore(out, f"_raw_{out_col}", keys)
+
+    _build_mom_layer(ev.structural_days, out_col="layer_z_structural_63_126")
+    _build_mom_layer(ev.confirm_days, out_col="layer_z_confirm_30")
+    _build_mom_layer(ev.trigger_days, out_col="layer_z_trigger_21")
+    _build_mom_layer(ev.micro_days, out_col="layer_z_micro_7")
+
+    # --- Regime-specific combination with top-down gating
+    def _rule_for(reg: Any) -> TopDownRegimeRule:
+        r = str(reg) if reg is not None else ""
+        if r in ev.regime_rules:
+            return ev.regime_rules[r]
+        # Small convenience defaults for common labels used in this repo/tests.
+        if r == "market_risk_on":
+            return TopDownRegimeRule(
+                weight_quality_365=0.75,
+                weight_structural_63_126=1.0,
+                weight_confirm_30=1.0,
+                weight_trigger_21=1.0,
+                weight_micro_7=0.5,
+                micro_mode="pullback",
+                gate_strength=1.25,
+            )
+        if r == "market_risk_off":
+            return TopDownRegimeRule(
+                weight_quality_365=1.25,
+                weight_structural_63_126=0.5,
+                weight_confirm_30=0.0,
+                weight_trigger_21=0.0,
+                weight_micro_7=0.0,
+                micro_mode="ignore",
+                gate_strength=1.0,
+            )
+        return ev.default_rule
+
+    # Build per-row rules efficiently.
+    if ev.regime_aware and regime_col in out.columns:
+        rules = out[regime_col].map(_rule_for)
+    else:
+        rules = pd.Series([ev.default_rule] * len(out), index=out.index, dtype="object")
+
+    q = pd.to_numeric(out["layer_z_quality_365"], errors="coerce").astype("float64")
+    s = pd.to_numeric(out["layer_z_structural_63_126"], errors="coerce").astype("float64")
+    c = pd.to_numeric(out["layer_z_confirm_30"], errors="coerce").astype("float64")
+    t = pd.to_numeric(out["layer_z_trigger_21"], errors="coerce").astype("float64")
+    m = pd.to_numeric(out["layer_z_micro_7"], errors="coerce").astype("float64")
+
+    # Micro timing adjustment (pullback vs follow).
+    micro_adj = m.copy()
+    micro_mode = rules.map(lambda rr: rr.micro_mode)
+    micro_adj = micro_adj.where(micro_mode != "pullback", other=-micro_adj)
+    micro_adj = micro_adj.where(micro_mode != "ignore", other=0.0)
+
+    # Soft gate: product of sigmoid(long layers). This makes short-horizon layers matter
+    # most when long-horizon context is supportive, without hard filtering.
+    gs = rules.map(lambda rr: float(rr.gate_strength)).astype("float64")
+    gate = (
+        _sigmoid(gs * q).astype("float64")
+        * _sigmoid(gs * s).astype("float64")
+        * _sigmoid(gs * c).astype("float64")
+    )
+    out["topdown_gate"] = gate
+
+    wq = rules.map(lambda rr: float(rr.weight_quality_365)).astype("float64")
+    ws = rules.map(lambda rr: float(rr.weight_structural_63_126)).astype("float64")
+    wc = rules.map(lambda rr: float(rr.weight_confirm_30)).astype("float64")
+    wt = rules.map(lambda rr: float(rr.weight_trigger_21)).astype("float64")
+    wm = rules.map(lambda rr: float(rr.weight_micro_7)).astype("float64")
+
+    # "Reverse order": trigger + micro are gated by the long-horizon context.
+    out["edge_score_topdown"] = (wq * q) + (ws * s) + (wc * c) + gate * (
+        (wt * t) + (wm * micro_adj)
+    )
+
+    # Cleanup internal helper columns.
+    drop_cols = [c for c in out.columns if c.startswith("_raw_")]
+    if drop_cols:
+        out = out.drop(columns=drop_cols)
+    return out
+
+
 def apply_indicators_to_candidates(
     candidates: pd.DataFrame,
     *,
     date_col: str = "date",
     regime_col: str = "regime",
-    evaluation: EdgeEvaluation | None = None,
+    evaluation: EdgeEvaluation | TopDownEvaluation | None = None,
 ) -> pd.DataFrame:
     """
     Apply regime-aware + horizon-aware cross-sectional indicators to a candidate list.
@@ -613,6 +834,17 @@ def apply_indicators_to_candidates(
     if candidates.empty:
         out = candidates.copy()
         out["edge_score"] = pd.Series(dtype="float64")
+        return out
+
+    # Optional alternate strategy: top-down horizon integration.
+    if isinstance(evaluation, TopDownEvaluation):
+        out = apply_topdown_to_candidates(
+            candidates, date_col=date_col, regime_col=regime_col, evaluation=evaluation
+        )
+        # Keep `edge_score` stable for downstream consumers.
+        out["edge_score"] = pd.to_numeric(
+            out["edge_score_topdown"], errors="coerce"
+        ).astype("float64")
         return out
 
     ev = evaluation or default_edge_evaluation()
