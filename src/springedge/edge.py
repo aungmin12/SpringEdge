@@ -1640,11 +1640,56 @@ def _run_and_print_edge(
         print("(no candidates)")
         return 0
 
+    def _pick_cli_columns(df: pd.DataFrame) -> list[str]:
+        """
+        Keep CLI output compact by default (avoid dumping hundreds of columns).
+
+        Users can override with --print-all-columns.
+        """
+        preferred = [
+            # identity
+            "symbol",
+            "universe",
+            "date",
+            # prices/liquidity (common)
+            "close",
+            "volume",
+            "liquidity",
+            # regime context (if joined)
+            "regime",
+            "regime_id",
+            "risk_on_off",
+            "vol_regime",
+            "regime_score",
+            "position_multiplier",
+            "vix_level",
+            "vix_zscore",
+            "vix9d_over_vix",
+            "vix_vix3m_ratio",
+            "move_level",
+            "move_zscore",
+            "term_structure_state",
+            "event_risk_flag",
+            "joint_stress_flag",
+            # score outputs
+            "edge_score",
+            "edge_score_topdown",
+            "topdown_gate",
+        ]
+        cols = [c for c in preferred if c in df.columns]
+        # Fallback: if the preferred set isn't present, show a small slice.
+        if not cols:
+            cols = list(df.columns[:12])
+        return cols
+
+    shown_to_print = shown
+    if not getattr(args, "print_all_columns", False):
+        cols = _pick_cli_columns(shown)
+        shown_to_print = shown[cols].copy()
+
     # Keep the CLI output compact and stable.
-    with pd.option_context(
-        "display.max_rows", None, "display.max_columns", None, "display.width", 200
-    ):
-        print(shown.to_string(index=False))
+    with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 200):
+        print(shown_to_print.to_string(index=False))
 
     # `fetch_score_name_groups()` returns a DataFrame, which cannot be used in a boolean
     # context (pandas raises: "The truth value of a DataFrame is ambiguous.").
@@ -1654,15 +1699,24 @@ def _run_and_print_edge(
         if isinstance(score_groups, pd.DataFrame):
             if not score_groups.empty:
                 print("\nScore performance groups:")
-                with pd.option_context(
-                    "display.max_rows",
-                    None,
-                    "display.max_columns",
-                    None,
-                    "display.width",
-                    200,
-                ):
-                    print(score_groups.to_string(index=False))
+
+                # By default, do NOT print the full score_names lists (they can be huge).
+                cols = [c for c in ["horizon_days", "regime_label", "n_scores"] if c in score_groups.columns]
+                score_groups_to_print = score_groups
+
+                if getattr(args, "print_score_names", False) and "score_names" in score_groups.columns:
+                    max_names = int(getattr(args, "max_score_names", 25) or 25)
+                    sg = score_groups.copy()
+                    sg["score_names_preview"] = sg["score_names"].apply(
+                        lambda xs: (list(xs)[:max_names] if isinstance(xs, list) else xs)
+                    )
+                    cols = cols + ["score_names_preview"]
+                    score_groups_to_print = sg[cols]
+                else:
+                    score_groups_to_print = score_groups[cols] if cols else score_groups
+
+                with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 200):
+                    print(score_groups_to_print.to_string(index=False))
         elif isinstance(score_groups, dict):
             if score_groups:
                 print("\nScore performance groups:")
@@ -1745,6 +1799,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--no-score-performance",
         action="store_true",
         help="Do not attempt to fetch/print score performance groups after the Edge run.",
+    )
+    p.add_argument(
+        "--print-all-columns",
+        action="store_true",
+        help="Print all candidate columns (can be very wide). Default: print a compact subset.",
+    )
+    p.add_argument(
+        "--print-score-names",
+        action="store_true",
+        help="Include a preview of score_names when printing score performance groups. Default: hidden.",
+    )
+    p.add_argument(
+        "--max-score-names",
+        type=int,
+        default=25,
+        help="Max score names to show when using --print-score-names. Default: 25.",
     )
     p.add_argument(
         "--score-performance-table",
