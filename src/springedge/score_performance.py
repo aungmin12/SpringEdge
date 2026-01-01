@@ -41,6 +41,177 @@ def _missing_table_error(err: Exception, *, table_name: str) -> bool:
     return any((f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg) for c in candidates)
 
 
+def _load_table_as_df(conn: Any, *, table: str) -> pd.DataFrame:
+    """
+    Load a table as a DataFrame (best-effort) via DB-API cursor.
+
+    This avoids pandas.read_sql_query driver warnings for some DB-API connections.
+    """
+    t = _validate_table_ref(table, kind="table")
+    sql = f"SELECT * FROM {t}"
+    cur = conn.cursor()
+    try:
+        try:
+            cur.execute(sql)
+        except Exception:
+            try:
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+            except Exception:
+                pass
+            raise
+        rows = cur.fetchall()
+        cols = [d[0] for d in (cur.description or [])]
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return pd.DataFrame.from_records(rows, columns=cols)
+
+
+def _first_present(columns: list[str], candidates: Sequence[str]) -> str | None:
+    cols = {str(c) for c in columns}
+    for cand in candidates:
+        if cand in cols:
+            return cand
+    return None
+
+
+def _maybe_scale_pct(x: pd.Series) -> pd.Series:
+    """
+    Heuristic: if values look like percent points (e.g. 7.2), scale to decimals (0.072).
+    """
+    s = pd.to_numeric(x, errors="coerce").astype("float64")
+    m = float(s.abs().dropna().median()) if not s.dropna().empty else 0.0
+    # If typical magnitudes exceed ~1.5, it's very likely percent points.
+    if m > 1.5:
+        return s / 100.0
+    return s
+
+
+def fetch_actionable_score_names(
+    conn: Any,
+    *,
+    table: str = "score_performance_evaluation",
+    horizon_days: int = 365,
+    min_abs_spearman_ic: float = 0.10,
+    min_ic_ir: float = 1.5,
+    min_abs_q5_minus_q1: float = 0.05,
+    require_all_regimes: bool = True,
+) -> list[str]:
+    """
+    Filter `score_name` values by ALL criteria:
+    - A: |spearman_ic| >= min_abs_spearman_ic
+    - B: ic_ir >= min_ic_ir
+    - C: |q5-q1| >= min_abs_q5_minus_q1 (for the provided horizon_days; default 365)
+
+    Table expectations (column names are best-effort / inferred):
+    - score_name, horizon_days, (optional) regime_label
+    - spearman_ic (or a close alias)
+    - ic_ir (or a close alias)
+    - either q5_minus_q1 (or alias) OR both q5 and q1 return columns
+
+    If `require_all_regimes=True`, a score is actionable only if it passes the criteria
+    for every row (typically each regime_label) at the given horizon_days.
+    """
+    # Load from configured table, but fall back to intelligence.* and return empty if missing.
+    try:
+        df = _load_table_as_df(conn, table=table)
+    except Exception as exc:
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+        except Exception:
+            pass
+        if _missing_table_error(exc, table_name=table):
+            try:
+                df = _load_table_as_df(conn, table="intelligence.score_performance_evaluation")
+            except Exception as exc2:
+                try:
+                    if hasattr(conn, "rollback"):
+                        conn.rollback()
+                except Exception:
+                    pass
+                if _missing_table_error(exc2, table_name="intelligence.score_performance_evaluation"):
+                    return []
+                raise
+        else:
+            raise
+
+    if df.empty:
+        return []
+
+    df.columns = [str(c) for c in df.columns]
+    cols = list(df.columns)
+
+    score_col = _first_present(cols, ("score_name", "score", "name"))
+    horizon_col = _first_present(cols, ("horizon_days", "horizon", "horizon_day", "horizon_d"))
+    regime_col = _first_present(cols, ("regime_label", "regime", "market_regime", "regime_name"))
+
+    ic_col = _first_present(cols, ("spearman_ic", "rank_ic", "ic_spearman", "spearman_rank_ic", "ic"))
+    ir_col = _first_present(cols, ("ic_ir", "icir", "ir", "information_ratio"))
+
+    # Prefer an explicit spread column.
+    spread_col = _first_present(
+        cols,
+        (
+            "q5_minus_q1",
+            "q5_q1",
+            "q5_q1_spread",
+            "q5q1",
+            "q5_minus_q1_ret",
+            "q5_q1_ret",
+        ),
+    )
+    # Otherwise compute spread from quintile return columns.
+    q5_col = _first_present(cols, ("q5", "q5_ret", "q5_return", "ret_q5", "q5_mean"))
+    q1_col = _first_present(cols, ("q1", "q1_ret", "q1_return", "ret_q1", "q1_mean"))
+
+    missing: list[str] = []
+    if score_col is None:
+        missing.append("score_name")
+    if horizon_col is None:
+        missing.append("horizon_days")
+    if ic_col is None:
+        missing.append("spearman_ic")
+    if ir_col is None:
+        missing.append("ic_ir")
+    if spread_col is None and (q5_col is None or q1_col is None):
+        missing.append("q5-q1 (spread column or q5 & q1 columns)")
+    if missing:
+        raise ValueError(f"score_performance table missing required columns: {', '.join(missing)}")
+
+    work = df.copy()
+    work[score_col] = work[score_col].astype("string")
+    work[horizon_col] = pd.to_numeric(work[horizon_col], errors="coerce").astype("Int64")
+    work = work.dropna(subset=[score_col, horizon_col]).copy()
+    work = work[work[horizon_col] == int(horizon_days)].copy()
+    if work.empty:
+        return []
+
+    ic = pd.to_numeric(work[ic_col], errors="coerce").astype("float64")
+    ir = pd.to_numeric(work[ir_col], errors="coerce").astype("float64")
+    if spread_col is not None:
+        spread = _maybe_scale_pct(work[spread_col])
+    else:
+        spread = _maybe_scale_pct(work[q5_col]) - _maybe_scale_pct(work[q1_col])
+
+    passed = (ic.abs() >= float(min_abs_spearman_ic)) & (ir >= float(min_ic_ir)) & (spread.abs() >= float(min_abs_q5_minus_q1))
+    work["_passed"] = passed.fillna(False)
+
+    # If there is no regime column, treat as one row per score_name.
+    if not regime_col:
+        ok = work.groupby(score_col, dropna=False, sort=True)["_passed"].all()
+        return sorted(ok[ok].index.astype(str).tolist())
+
+    if require_all_regimes:
+        ok = work.groupby(score_col, dropna=False, sort=True)["_passed"].all()
+    else:
+        ok = work.groupby(score_col, dropna=False, sort=True)["_passed"].any()
+    return sorted(ok[ok].index.astype(str).tolist())
+
+
 def fetch_score_name_groups(
     conn: Any,
     *,
@@ -164,6 +335,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="score_performance_evaluation",
         help="Source table name. Default: score_performance_evaluation (also tries intelligence.score_performance_evaluation).",
     )
+    p.add_argument(
+        "--actionable",
+        action="store_true",
+        help="Print only actionable score_name values (filters by |spearman_ic|, ic_ir, and |q5-q1| at a horizon).",
+    )
+    p.add_argument("--horizon-days", type=int, default=365, help="Horizon (days) used for actionable filtering. Default: 365.")
+    p.add_argument("--min-abs-spearman-ic", type=float, default=0.10, help="Actionable threshold A. Default: 0.10.")
+    p.add_argument("--min-ic-ir", type=float, default=1.5, help="Actionable threshold B. Default: 1.5.")
+    p.add_argument("--min-abs-q5-q1", type=float, default=0.05, help="Actionable threshold C (in decimals). Default: 0.05.")
+    p.add_argument(
+        "--any-regime",
+        action="store_true",
+        help="If set, a score is actionable if it passes in ANY regime row (default requires ALL regimes).",
+    )
     args = p.parse_args(list(argv) if argv is not None else None)
 
     level = getattr(logging, str(args.log_level).upper(), logging.INFO)
@@ -179,43 +364,79 @@ def main(argv: Sequence[str] | None = None) -> int:
         _LOG.info("Running demo sqlite score_performance pipeline.")
         conn = sqlite3.connect(":memory:")
         conn.execute(
-            "create table score_performance_evaluation (score_name text, horizon_days integer, regime_label text)"
+            "create table score_performance_evaluation (score_name text, horizon_days integer, regime_label text, spearman_ic real, ic_ir real, q5_minus_q1 real)"
         )
         conn.executemany(
-            "insert into score_performance_evaluation (score_name, horizon_days, regime_label) values (?, ?, ?)",
+            "insert into score_performance_evaluation (score_name, horizon_days, regime_label, spearman_ic, ic_ir, q5_minus_q1) values (?, ?, ?, ?, ?, ?)",
             [
-                ("alpha", 21, "risk_on"),
-                ("alpha", 21, "risk_on"),  # dup
-                ("beta", 21, "risk_on"),
-                ("alpha", 63, "risk_off"),
-                ("gamma", 63, "risk_off"),
+                # 365d + two regimes
+                ("alpha", 365, "risk_on", 0.12, 1.6, 0.06),
+                ("alpha", 365, "risk_off", 0.11, 1.7, 0.055),
+                # fails A
+                ("beta", 365, "risk_on", 0.05, 3.0, 0.20),
+                # fails B
+                ("gamma", 365, "risk_on", 0.20, 1.0, 0.20),
+                # fails C
+                ("delta", 365, "risk_on", 0.20, 2.0, 0.01),
             ],
         )
-        df = fetch_score_name_groups(conn, table=args.table)
+        if args.actionable:
+            scores = fetch_actionable_score_names(
+                conn,
+                table=args.table,
+                horizon_days=args.horizon_days,
+                min_abs_spearman_ic=args.min_abs_spearman_ic,
+                min_ic_ir=args.min_ic_ir,
+                min_abs_q5_minus_q1=args.min_abs_q5_q1,
+                require_all_regimes=not args.any_regime,
+            )
+            df = pd.DataFrame({"score_name": scores})
+        else:
+            df = fetch_score_name_groups(conn, table=args.table)
         try:
             conn.close()
         except Exception:
             pass
     else:
-        _LOG.info("Fetching score performance groups (table=%s).", args.table)
+        if args.actionable:
+            _LOG.info("Filtering actionable score names (table=%s horizon_days=%s).", args.table, args.horizon_days)
+        else:
+            _LOG.info("Fetching score performance groups (table=%s).", args.table)
         with db_connection(args.db_url, env_var=args.env_var) as conn:
-            df = fetch_score_name_groups(conn, table=args.table)
+            if args.actionable:
+                scores = fetch_actionable_score_names(
+                    conn,
+                    table=args.table,
+                    horizon_days=args.horizon_days,
+                    min_abs_spearman_ic=args.min_abs_spearman_ic,
+                    min_ic_ir=args.min_ic_ir,
+                    min_abs_q5_minus_q1=args.min_abs_q5_q1,
+                    require_all_regimes=not args.any_regime,
+                )
+                df = pd.DataFrame({"score_name": scores})
+            else:
+                df = fetch_score_name_groups(conn, table=args.table)
 
-    payload = [
-        {
-            "horizon_days": int(row.horizon_days),
-            "regime_label": str(row.regime_label),
-            "n_scores": int(row.n_scores),
-            "score_names": list(row.score_names),
-        }
-        for row in df.itertuples(index=False)
-    ]
-    print(json.dumps(payload, indent=2, sort_keys=False))
-    _LOG.info("Done (groups=%d).", len(payload))
+    if args.actionable:
+        payload = df["score_name"].astype("string").dropna().astype(str).tolist() if "score_name" in df.columns else []
+        print(json.dumps(payload, indent=2, sort_keys=False))
+        _LOG.info("Done (actionable_scores=%d).", len(payload))
+    else:
+        payload = [
+            {
+                "horizon_days": int(row.horizon_days),
+                "regime_label": str(row.regime_label),
+                "n_scores": int(row.n_scores),
+                "score_names": list(row.score_names),
+            }
+            for row in df.itertuples(index=False)
+        ]
+        print(json.dumps(payload, indent=2, sort_keys=False))
+        _LOG.info("Done (groups=%d).", len(payload))
     return 0
 
 
-__all__ = ["fetch_score_name_groups", "main"]
+__all__ = ["fetch_actionable_score_names", "fetch_score_name_groups", "main"]
 
 
 if __name__ == "__main__":

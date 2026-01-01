@@ -23,7 +23,7 @@ from .regime import (
     market_regime_counts_and_trend,
     quarterly_regime_profile,
 )
-from .score_performance import fetch_score_name_groups
+from .score_performance import fetch_actionable_score_names, fetch_score_name_groups
 
 __all__ = [
     "compute_edge_features",
@@ -41,6 +41,7 @@ __all__ = [
     "market_regime_counts_and_trend",
     "quarterly_regime_profile",
     "fetch_score_name_groups",
+    "fetch_actionable_score_names",
     "connect_db",
     "db_connection",
 ]
