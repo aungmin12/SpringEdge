@@ -2,13 +2,17 @@ README.md
 pyproject.toml
 src/springedge/__init__.py
 src/springedge/db.py
+src/springedge/edge.py
 src/springedge/features.py
 src/springedge/indicators.py
 src/springedge/layers.py
+src/springedge/regime.py
 src/springedge.egg-info/PKG-INFO
 src/springedge.egg-info/SOURCES.txt
 src/springedge.egg-info/dependency_links.txt
 src/springedge.egg-info/requires.txt
 src/springedge.egg-info/top_level.txt
 tests/test_db.py
+tests/test_db_layers_and_regime.py
+tests/test_edge_end_to_end.py
 tests/test_features.py
