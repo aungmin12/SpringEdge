@@ -734,12 +734,24 @@ def apply_topdown_to_candidates(
     if ev.regime_aware and regime_col in out.columns:
         keys.append(regime_col)
 
+    _LOG.info(
+        "topdown: apply_topdown_to_candidates: rows=%d keys=%s regime_aware=%s",
+        len(out),
+        keys,
+        bool(ev.regime_aware),
+    )
+
     # --- 365D "business quality" (structural / fundamental proxies)
     qcols = [c for c in ev.quality_cols if c in out.columns]
     if qcols:
+        _LOG.info("topdown: quality_365: using cols=%s", qcols)
         out["_raw_quality_365"] = out[qcols].mean(axis=1)
         out["layer_z_quality_365"] = _groupwise_zscore(out, "_raw_quality_365", keys)
     else:
+        _LOG.info(
+            "topdown: quality_365: no quality cols present (expected one of=%s)",
+            list(ev.quality_cols),
+        )
         out["layer_z_quality_365"] = np.nan
 
     # --- Helper to build horizon layers from momentum columns
@@ -750,8 +762,14 @@ def apply_topdown_to_candidates(
             if c is not None:
                 cols.append(c)
         if not cols:
+            _LOG.info(
+                "topdown: %s: no momentum cols found for days=%s (expected naming: mom_ret_{N}d or mom_ret_{N})",
+                out_col,
+                list(days),
+            )
             out[out_col] = np.nan
             return
+        _LOG.info("topdown: %s: using cols=%s", out_col, cols)
         out[f"_raw_{out_col}"] = out[cols].mean(axis=1)
         out[out_col] = _groupwise_zscore(out, f"_raw_{out_col}", keys)
 
@@ -794,6 +812,28 @@ def apply_topdown_to_candidates(
     else:
         rules = pd.Series([ev.default_rule] * len(out), index=out.index, dtype="object")
 
+    # Compact rule summary (useful for confirming which regime rules are active).
+    if ev.regime_aware and regime_col in out.columns:
+        try:
+            vc = out[regime_col].astype("string").value_counts(dropna=False)
+            for reg, n in vc.items():
+                rr = _rule_for(reg)
+                _LOG.info(
+                    "topdown: regime=%s n=%d rule=(wq=%.3f ws=%.3f wc=%.3f wt=%.3f wm=%.3f micro_mode=%s gate_strength=%.3f)",
+                    str(reg),
+                    int(n),
+                    float(rr.weight_quality_365),
+                    float(rr.weight_structural_63_126),
+                    float(rr.weight_confirm_30),
+                    float(rr.weight_trigger_21),
+                    float(rr.weight_micro_7),
+                    str(rr.micro_mode),
+                    float(rr.gate_strength),
+                )
+        except Exception:
+            # Best-effort only; scoring should still proceed if summarization fails.
+            pass
+
     q = pd.to_numeric(out["layer_z_quality_365"], errors="coerce").astype("float64")
     s = pd.to_numeric(out["layer_z_structural_63_126"], errors="coerce").astype("float64")
     c = pd.to_numeric(out["layer_z_confirm_30"], errors="coerce").astype("float64")
@@ -815,6 +855,20 @@ def apply_topdown_to_candidates(
         * _sigmoid(gs * c).astype("float64")
     )
     out["topdown_gate"] = gate
+    try:
+        # Quick health check for gating behavior.
+        g = pd.to_numeric(gate, errors="coerce").astype("float64")
+        nn = int(g.notna().sum())
+        _LOG.info(
+            "topdown: gate: non_nan=%d/%d min=%.6f mean=%.6f max=%.6f",
+            nn,
+            len(g),
+            float(g.min()) if nn else float("nan"),
+            float(g.mean()) if nn else float("nan"),
+            float(g.max()) if nn else float("nan"),
+        )
+    except Exception:
+        pass
 
     wq = rules.map(lambda rr: float(rr.weight_quality_365)).astype("float64")
     ws = rules.map(lambda rr: float(rr.weight_structural_63_126)).astype("float64")
@@ -826,6 +880,19 @@ def apply_topdown_to_candidates(
     out["edge_score_topdown"] = (wq * q) + (ws * s) + (wc * c) + gate * (
         (wt * t) + (wm * micro_adj)
     )
+    try:
+        sc = pd.to_numeric(out["edge_score_topdown"], errors="coerce").astype("float64")
+        nn = int(sc.notna().sum())
+        _LOG.info(
+            "topdown: edge_score_topdown: non_nan=%d/%d min=%.6f mean=%.6f max=%.6f",
+            nn,
+            len(sc),
+            float(sc.min()) if nn else float("nan"),
+            float(sc.mean()) if nn else float("nan"),
+            float(sc.max()) if nn else float("nan"),
+        )
+    except Exception:
+        pass
 
     # Cleanup internal helper columns.
     drop_cols = [c for c in out.columns if c.startswith("_raw_")]
@@ -855,6 +922,10 @@ def apply_indicators_to_candidates(
 
     # Optional alternate strategy: top-down horizon integration.
     if isinstance(evaluation, TopDownEvaluation):
+        _LOG.info(
+            "apply_indicators_to_candidates: strategy=topdown_multi_horizon rows=%d",
+            len(candidates),
+        )
         out = apply_topdown_to_candidates(
             candidates, date_col=date_col, regime_col=regime_col, evaluation=evaluation
         )
