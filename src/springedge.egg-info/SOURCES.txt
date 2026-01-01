@@ -1,5 +1,7 @@
 README.md
 pyproject.toml
+src/intelligence/__init__.py
+src/intelligence/sp500_tickers.py
 src/springedge/__init__.py
 src/springedge/db.py
 src/springedge/edge.py
@@ -16,3 +18,4 @@ tests/test_db.py
 tests/test_db_layers_and_regime.py
 tests/test_edge_end_to_end.py
 tests/test_features.py
+tests/test_intelligence_imports.py
