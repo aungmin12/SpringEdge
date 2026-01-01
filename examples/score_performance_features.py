@@ -7,7 +7,7 @@ from springedge import db_connection, fetch_score_name_groups
 
 def main() -> None:
     """
-    Print distinct score_name values grouped by horizon_days and regime_label.
+    Print distinct score_name values grouped by regime_label.
 
     Usage:
       export SPRINGEDGE_DB_URL="postgresql://USER:PASSWORD@HOST:5432/DBNAME"
@@ -19,7 +19,6 @@ def main() -> None:
     # Pretty JSON for copy/paste into docs or tickets.
     payload = [
         {
-            "horizon_days": int(row.horizon_days),
             "regime_label": str(row.regime_label),
             "n_scores": int(row.n_scores),
             "score_names": list(row.score_names),
