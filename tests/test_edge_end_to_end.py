@@ -8,9 +8,10 @@ from springedge import run_edge
 
 def test_run_edge_end_to_end_sqlite_baseline_to_scored_candidates():
     conn = sqlite3.connect(":memory:")
+    conn.execute("ATTACH DATABASE ':memory:' AS core")
     conn.execute("create table sp500 (date text, symbol text)")
     conn.execute(
-        "create table ohlcv_daily (symbol text, date text, open real, high real, low real, close real, volume real)"
+        "create table core.prices_daily (symbol text, date text, open real, high real, low real, close real, volume real)"
     )
 
     # Baseline snapshot (latest = 2024-02-01).
@@ -44,7 +45,7 @@ def test_run_edge_end_to_end_sqlite_baseline_to_scored_candidates():
             )
         )
         conn.executemany(
-            "insert into ohlcv_daily (symbol, date, open, high, low, close, volume) values (?, ?, ?, ?, ?, ?, ?)",
+            "insert into core.prices_daily (symbol, date, open, high, low, close, volume) values (?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
 
