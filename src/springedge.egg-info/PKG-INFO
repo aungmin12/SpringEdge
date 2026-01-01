@@ -39,6 +39,36 @@ Install:
 python3 -m pip install -e ".[dev]"
 ```
 
+## Database connection (Postgres)
+
+SpringEdge includes a small helper you can reuse from any script. You provide credentials via an environment variable.
+
+1) Install a Postgres DB driver (one of):
+
+```bash
+python3 -m pip install "psycopg[binary]"
+# or
+python3 -m pip install psycopg2-binary
+```
+
+2) Export your database URL:
+
+```bash
+export SPRINGEDGE_DB_URL="postgresql://USER:PASSWORD@HOST:5432/DBNAME"
+```
+
+3) Use it in your script:
+
+```python
+from springedge import db_connection
+
+with db_connection() as conn:
+    # Use your driver’s DB-API interface
+    cur = conn.cursor()
+    cur.execute("select 1;")
+    print(cur.fetchone())
+```
+
 Run example:
 
 ```bash
