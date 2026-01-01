@@ -77,7 +77,7 @@ def fetch_ohlcv_daily(
     conn: Any,
     *,
     symbols: Sequence[str],
-    table: str = "ohlcv_daily",
+    table: str = "core.prices_daily",
     symbol_col: str = "symbol",
     date_col: str = "date",
     open_col: str = "open",
@@ -92,7 +92,7 @@ def fetch_ohlcv_daily(
     Fetch daily OHLCV rows for a list of symbols.
 
     Expected table shape (defaults):
-    - table: `ohlcv_daily`
+    - table: `core.prices_daily`
     - columns: symbol, date, open, high, low, close, volume
 
     Returns a DataFrame with canonical column names:
@@ -184,6 +184,29 @@ def fetch_ohlcv_daily(
                 conn.rollback()
         except Exception:
             pass
+        # Production schema compatibility: many DBs store daily prices in a schema,
+        # e.g. `core.prices_daily`, while others expose it as `prices_daily` or `ohlcv_daily`.
+        if table == "core.prices_daily" and _missing_table_error(exc, table_name="core.prices_daily"):
+            for cand in ("prices_daily", "ohlcv_daily"):
+                try:
+                    return fetch_ohlcv_daily(
+                        conn,
+                        symbols=symbols,
+                        table=cand,
+                        symbol_col=symbol_col,
+                        date_col=date_col,
+                        open_col=open_col,
+                        high_col=high_col,
+                        low_col=low_col,
+                        close_col=close_col,
+                        volume_col=volume_col,
+                        start=start,
+                        end=end,
+                    )
+                except Exception as exc2:
+                    if _missing_table_error(exc2, table_name=cand):
+                        continue
+                    raise
         # Production schema compatibility: some DBs name this table `prices_daily`,
         # and some schema-qualify it under `core`.
         if table == "ohlcv_daily" and _missing_table_error(exc, table_name="ohlcv_daily"):
@@ -453,7 +476,7 @@ def run_edge(
     baseline_as_of_col: str | None = "date",
     baseline_as_of: str | date | datetime | None = None,
     # ohlcv fetch
-    ohlcv_table: str = "ohlcv_daily",
+    ohlcv_table: str = "core.prices_daily",
     ohlcv_symbol_col: str = "symbol",
     ohlcv_date_col: str = "date",
     ohlcv_start: str | date | datetime | None = None,
@@ -598,7 +621,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--baseline-symbol-col", default="symbol")
     p.add_argument("--baseline-as-of-col", default="date")
     p.add_argument("--baseline-as-of", default=None, help="Baseline snapshot as-of date (e.g. 2024-02-01).")
-    p.add_argument("--ohlcv-table", default="ohlcv_daily")
+    p.add_argument("--ohlcv-table", default="core.prices_daily")
     p.add_argument("--ohlcv-symbol-col", default="symbol")
     p.add_argument("--ohlcv-date-col", default="date")
     p.add_argument("--ohlcv-start", default=None, help="OHLCV start date filter (inclusive).")
@@ -631,9 +654,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         _LOG.info("Running demo sqlite pipeline.")
         conn = sqlite3.connect(":memory:")
+        # SQLite doesn't support schemas unless you ATTACH another database.
+        # This keeps the demo consistent with the default Postgres table name.
+        conn.execute("ATTACH DATABASE ':memory:' AS core")
         conn.execute("create table sp500 (date text, symbol text)")
         conn.execute(
-            "create table ohlcv_daily (symbol text, date text, open real, high real, low real, close real, volume real)"
+            "create table core.prices_daily (symbol text, date text, open real, high real, low real, close real, volume real)"
         )
         conn.executemany(
             "insert into sp500 (date, symbol) values (?, ?)",
@@ -663,7 +689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             conn.executemany(
-                "insert into ohlcv_daily (symbol, date, open, high, low, close, volume) values (?, ?, ?, ?, ?, ?, ?)",
+                "insert into core.prices_daily (symbol, date, open, high, low, close, volume) values (?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
         out = run_edge(

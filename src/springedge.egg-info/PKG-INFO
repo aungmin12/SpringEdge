@@ -75,11 +75,11 @@ with db_connection() as conn:
 
 By default, `springedge.edge.run_edge()` (and `python3 -m springedge.edge`) expects:
 - baseline universe table: `sp500` (columns: `date`, `symbol`)
-- OHLCV table: `ohlcv_daily` (columns: `symbol`, `date`, `open`, `high`, `low`, `close`, `volume`)
+- OHLCV table: `core.prices_daily` (columns: `symbol`, `date`, `open`, `high`, `low`, `close`, `volume`)
 
 If your production schema uses different names, SpringEdge will automatically fall back for common aliases:
 - `sp500` → `sp500_tickers`
-- `ohlcv_daily` → `prices_daily`
+- `core.prices_daily` → `prices_daily` → `ohlcv_daily`
 
 You can also override explicitly:
 
