@@ -884,6 +884,77 @@ def _parse_horizon_days(values: Sequence[str] | None) -> tuple[int, ...] | None:
     return tuple(out)
 
 
+def _run_and_print_edge(
+    conn: Any,
+    *,
+    args: argparse.Namespace,
+    baseline_as_of_col: str | None,
+    horizon_days: tuple[int, ...] | None,
+) -> int:
+    out = run_edge(
+        conn=conn,
+        baseline_table=args.baseline_table,
+        baseline_symbol_col=args.baseline_symbol_col,
+        baseline_as_of_col=baseline_as_of_col,  # type: ignore[arg-type]
+        baseline_as_of=args.baseline_as_of,
+        ohlcv_table=args.ohlcv_table,
+        ohlcv_symbol_col=args.ohlcv_symbol_col,
+        ohlcv_date_col=args.ohlcv_date_col,
+        ohlcv_start=args.ohlcv_start,
+        ohlcv_end=args.ohlcv_end,
+        universe=args.universe,
+        horizon_days=horizon_days,
+        horizon_basis=args.horizon_basis,
+        candidates_as_of=args.candidates_as_of,
+    )
+
+    score_groups: Any = None
+    if not args.no_score_performance:
+        try:
+            from .score_performance import fetch_score_name_groups
+
+            score_groups = fetch_score_name_groups(conn, table=args.score_performance_table)
+        except Exception as exc:
+            _LOG.warning("score_performance: skipped (%s)", exc)
+
+    shown = out if not args.top else out.head(int(args.top))
+    if shown.empty:
+        print("(no candidates)")
+        return 0
+
+    # Keep the CLI output compact and stable.
+    with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 200):
+        print(shown.to_string(index=False))
+
+    # `fetch_score_name_groups()` returns a DataFrame, which cannot be used in a boolean
+    # context (pandas raises: "The truth value of a DataFrame is ambiguous.").
+    # Historically this CLI printed a small summary when groups were available; keep the
+    # behavior but make it robust to both DataFrame and dict-like returns.
+    if score_groups is not None:
+        if isinstance(score_groups, pd.DataFrame):
+            if not score_groups.empty:
+                print("\nScore performance groups:")
+                with pd.option_context(
+                    "display.max_rows",
+                    None,
+                    "display.max_columns",
+                    None,
+                    "display.width",
+                    200,
+                ):
+                    print(score_groups.to_string(index=False))
+        elif isinstance(score_groups, dict):
+            if score_groups:
+                print("\nScore performance groups:")
+                for k in sorted(score_groups.keys()):
+                    try:
+                        n = len(score_groups[k])
+                    except Exception:
+                        n = 0
+                    print(f"- {k}: {n} scores")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """
     CLI entrypoint.
@@ -985,74 +1056,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     horizon_days = _parse_horizon_days(args.horizon_days)
 
-    score_groups = None
-
     baseline_as_of_col = str(args.baseline_as_of_col or "").strip()
     if baseline_as_of_col.lower() in {"", "none", "null"}:
         baseline_as_of_col = None  # type: ignore[assignment]
-
-    def _run_and_print(conn: Any) -> int:
-        nonlocal score_groups
-        out = run_edge(
-            conn=conn,
-            baseline_table=args.baseline_table,
-            baseline_symbol_col=args.baseline_symbol_col,
-            baseline_as_of_col=baseline_as_of_col,  # type: ignore[arg-type]
-            baseline_as_of=args.baseline_as_of,
-            ohlcv_table=args.ohlcv_table,
-            ohlcv_symbol_col=args.ohlcv_symbol_col,
-            ohlcv_date_col=args.ohlcv_date_col,
-            ohlcv_start=args.ohlcv_start,
-            ohlcv_end=args.ohlcv_end,
-            universe=args.universe,
-            horizon_days=horizon_days,
-            horizon_basis=args.horizon_basis,
-            candidates_as_of=args.candidates_as_of,
-        )
-
-        if not args.no_score_performance:
-            try:
-                from .score_performance import fetch_score_name_groups
-
-                score_groups = fetch_score_name_groups(conn, table=args.score_performance_table)
-            except Exception as exc:
-                _LOG.warning("score_performance: skipped (%s)", exc)
-
-        shown = out if not args.top else out.head(int(args.top))
-        if shown.empty:
-            print("(no candidates)")
-            return 0
-
-        # Keep the CLI output compact and stable.
-        with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 200):
-            print(shown.to_string(index=False))
-        # `fetch_score_name_groups()` returns a DataFrame, which cannot be used in a boolean
-        # context (pandas raises: "The truth value of a DataFrame is ambiguous.").
-        # Historically this CLI printed a small summary when groups were available; keep the
-        # behavior but make it robust to both DataFrame and dict-like returns.
-        if score_groups is not None:
-            if isinstance(score_groups, pd.DataFrame):
-                if not score_groups.empty:
-                    print("\nScore performance groups:")
-                    with pd.option_context(
-                        "display.max_rows",
-                        None,
-                        "display.max_columns",
-                        None,
-                        "display.width",
-                        200,
-                    ):
-                        print(score_groups.to_string(index=False))
-            elif isinstance(score_groups, dict):
-                if score_groups:
-                    print("\nScore performance groups:")
-                    for k in sorted(score_groups.keys()):
-                        try:
-                            n = len(score_groups[k])
-                        except Exception:
-                            n = 0
-                        print(f"- {k}: {n} scores")
-        return 0
 
     if args.demo:
         import sqlite3
@@ -1158,7 +1164,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             horizon_days = (7, 21)
 
         try:
-            return _run_and_print(conn)
+            return _run_and_print_edge(conn, args=args, baseline_as_of_col=baseline_as_of_col, horizon_days=horizon_days)
         finally:
             try:
                 conn.close()
@@ -1166,7 +1172,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pass
 
     with db_connection(args.db_url, env_var=args.db_env_var) as conn:
-        return _run_and_print(conn)
+        return _run_and_print_edge(conn, args=args, baseline_as_of_col=baseline_as_of_col, horizon_days=horizon_days)
 
 
 if __name__ == "__main__":
