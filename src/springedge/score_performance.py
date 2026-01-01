@@ -37,6 +37,14 @@ ACTIONABLE_MIN_IC_IR = 1.5
 ACTIONABLE_MIN_ABS_Q5_MINUS_Q1 = 5.0
 
 
+def _rollback_quietly(conn: Any) -> None:
+    try:
+        if hasattr(conn, "rollback"):
+            conn.rollback()
+    except Exception:
+        pass
+
+
 def _missing_table_error(err: Exception, *, table_name: str) -> bool:
     """
     Best-effort detection of missing table errors across DB drivers.
@@ -64,11 +72,7 @@ def _load_table_as_df(conn: Any, *, table: str) -> pd.DataFrame:
         try:
             cur.execute(sql)
         except Exception:
-            try:
-                if hasattr(conn, "rollback"):
-                    conn.rollback()
-            except Exception:
-                pass
+            _rollback_quietly(conn)
             raise
         rows = cur.fetchall()
         cols = [d[0] for d in (cur.description or [])]
@@ -132,6 +136,34 @@ def _normalize_q5_q1_threshold_to_decimals(x: float) -> float:
     return v / 100.0 if abs(v) > 1.0 else v
 
 
+def _load_table_with_fallback(conn: Any, *, table: str) -> pd.DataFrame | None:
+    """
+    Load a score-performance table and apply a schema-qualified fallback.
+
+    Behavior:
+    - tries `table`
+    - if missing:
+      - when `table` is unqualified: tries `intelligence.<table>`
+      - when `table` is qualified: tries the unqualified tail name
+    - returns None if both are missing
+    """
+    try:
+        return _load_table_as_df(conn, table=table)
+    except Exception as exc:
+        _rollback_quietly(conn)
+        if not _missing_table_error(exc, table_name=table):
+            raise
+
+    fallback = "intelligence." + str(table) if "." not in str(table) else str(table).split(".")[-1]
+    try:
+        return _load_table_as_df(conn, table=fallback)
+    except Exception as exc2:
+        _rollback_quietly(conn)
+        if _missing_table_error(exc2, table_name=fallback):
+            return None
+        raise
+
+
 def _fetch_actionable_score_names_sql(
     conn: Any,
     *,
@@ -161,13 +193,6 @@ def _fetch_actionable_score_names_sql(
     conn_mod = str(getattr(conn.__class__, "__module__", "") or "")
     if ("psycopg" not in conn_mod) and ("psycopg2" not in conn_mod):
         return None
-
-    def _safe_rollback() -> None:
-        try:
-            if hasattr(conn, "rollback"):
-                conn.rollback()
-        except Exception:
-            pass
 
     unit = str(q5_q1_unit or "auto").strip().lower()
     if unit == "auto":
@@ -220,15 +245,11 @@ def _fetch_actionable_score_names_sql(
     try:
         try:
             cur.execute(sql, params)
-        except TypeError:
-            # Some drivers (or sqlite) use qmark paramstyle; if so, we can't safely
-            # attempt a generic rewrite here. Fall back to pandas path.
-            return None
         except Exception:
             # If the SQL attempt fails on Postgres, the transaction may now be aborted.
             # We must rollback before falling back to the pandas path to avoid
             # psycopg.errors.InFailedSqlTransaction on the next execute().
-            _safe_rollback()
+            _rollback_quietly(conn)
             return None
         rows = cur.fetchall()
     finally:
@@ -288,39 +309,8 @@ def fetch_actionable_score_names(
     if sql_res is not None:
         return sorted(set(map(str, sql_res)))
 
-    # Load from configured table, but fall back between common schema-qualified names and
-    # return empty if missing.
-    try:
-        df = _load_table_as_df(conn, table=table)
-    except Exception as exc:
-        try:
-            if hasattr(conn, "rollback"):
-                conn.rollback()
-        except Exception:
-            pass
-        if not _missing_table_error(exc, table_name=table):
-            raise
-
-        # If caller passed an unqualified table, try the intelligence.* schema.
-        # If caller passed intelligence.* already, try the unqualified variant.
-        fallback = (
-            "intelligence.score_performance_evaluation"
-            if "." not in str(table)
-            else str(table).split(".")[-1]
-        )
-        try:
-            df = _load_table_as_df(conn, table=fallback)
-        except Exception as exc2:
-            try:
-                if hasattr(conn, "rollback"):
-                    conn.rollback()
-            except Exception:
-                pass
-            if _missing_table_error(exc2, table_name=fallback):
-                return []
-            raise
-
-    if df.empty:
+    df = _load_table_with_fallback(conn, table=table)
+    if df is None or df.empty:
         return []
 
     df.columns = [str(c) for c in df.columns]
@@ -385,15 +375,12 @@ def fetch_actionable_score_names(
     )
     work["_passed"] = passed.fillna(False)
 
-    # If there is no regime column, treat as one row per score_name.
-    if not regime_col:
-        ok = work.groupby(score_col, dropna=False, sort=True)["_passed"].all()
-        return sorted(ok[ok].index.astype(str).tolist())
-
-    if require_all_regimes:
-        ok = work.groupby(score_col, dropna=False, sort=True)["_passed"].all()
+    # If there is no regime column, treat as one group per score_name.
+    gb = work.groupby(score_col, dropna=False, sort=True)["_passed"]
+    if (not regime_col) or require_all_regimes:
+        ok = gb.all()
     else:
-        ok = work.groupby(score_col, dropna=False, sort=True)["_passed"].any()
+        ok = gb.any()
     return sorted(ok[ok].index.astype(str).tolist())
 
 
