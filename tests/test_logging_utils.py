@@ -18,4 +18,3 @@ def test_table_log_formatter_crops_logger_name_from_left_to_preserve_suffix() ->
     out = fmt.format(record)
     assert "...rformance" in out
     assert "springedge" not in out
-

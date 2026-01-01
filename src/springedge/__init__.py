@@ -41,7 +41,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     # edge
     "EdgeEvaluation": ("springedge.edge", "EdgeEvaluation"),
     "IndicatorSpec": ("springedge.edge", "IndicatorSpec"),
-    "apply_indicators_to_candidates": ("springedge.edge", "apply_indicators_to_candidates"),
+    "apply_indicators_to_candidates": (
+        "springedge.edge",
+        "apply_indicators_to_candidates",
+    ),
     "build_candidate_list": ("springedge.edge", "build_candidate_list"),
     "default_edge_evaluation": ("springedge.edge", "default_edge_evaluation"),
     "fetch_ohlcv_daily": ("springedge.edge", "fetch_ohlcv_daily"),
@@ -53,13 +56,25 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "connect_db": ("springedge.db", "connect_db"),
     "db_connection": ("springedge.db", "db_connection"),
     # regime
-    "fetch_market_regime_last_n_days": ("springedge.regime", "fetch_market_regime_last_n_days"),
+    "fetch_market_regime_last_n_days": (
+        "springedge.regime",
+        "fetch_market_regime_last_n_days",
+    ),
     "fetch_regime_daily": ("springedge.regime", "fetch_regime_daily"),
-    "market_regime_counts_and_trend": ("springedge.regime", "market_regime_counts_and_trend"),
+    "market_regime_counts_and_trend": (
+        "springedge.regime",
+        "market_regime_counts_and_trend",
+    ),
     "quarterly_regime_profile": ("springedge.regime", "quarterly_regime_profile"),
     # score_performance
-    "fetch_score_name_groups": ("springedge.score_performance", "fetch_score_name_groups"),
-    "fetch_actionable_score_names": ("springedge.score_performance", "fetch_actionable_score_names"),
+    "fetch_score_name_groups": (
+        "springedge.score_performance",
+        "fetch_score_name_groups",
+    ),
+    "fetch_actionable_score_names": (
+        "springedge.score_performance",
+        "fetch_actionable_score_names",
+    ),
 }
 
 

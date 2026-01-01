@@ -4,4 +4,3 @@ def test_intelligence_sp500_tickers_importable():
 
     assert mod.DEFAULT_TABLE == "sp500_tickers"
     assert callable(mod.fetch_sp500_tickers)
-

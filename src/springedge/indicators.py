@@ -14,16 +14,18 @@ def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
       TR_t = max( high-low, abs(high-prev_close), abs(low-prev_close) )
     """
     h = _as_float(high)
-    l = _as_float(low)
+    lo = _as_float(low)
     c = _as_float(close)
     prev_c = c.shift(1)
-    a = (h - l).abs()
+    a = (h - lo).abs()
     b = (h - prev_c).abs()
-    c_ = (l - prev_c).abs()
+    c_ = (lo - prev_c).abs()
     return pd.concat([a, b, c_], axis=1).max(axis=1)
 
 
-def atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
+def atr(
+    high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14
+) -> pd.Series:
     """Simple moving average ATR on true range."""
     tr = true_range(high, low, close)
     return tr.rolling(window=window, min_periods=window).mean()
@@ -34,7 +36,9 @@ def log_returns(close: pd.Series) -> pd.Series:
     return np.log(c).diff()
 
 
-def ann_vol_from_log_returns(lr: pd.Series, window: int = 20, trading_days: int = 252) -> pd.Series:
+def ann_vol_from_log_returns(
+    lr: pd.Series, window: int = 20, trading_days: int = 252
+) -> pd.Series:
     """Annualized volatility using rolling std of log returns."""
     x = _as_float(lr)
     return x.rolling(window=window, min_periods=window).std() * np.sqrt(trading_days)

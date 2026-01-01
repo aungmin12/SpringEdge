@@ -231,4 +231,3 @@ def test_run_edge_end_to_end_sqlite_ohlcv_with_ticker_column_fallbacks():
     assert out["date"].notna().all()
     assert "edge_score" in out.columns
     assert out["regime"].tolist() == ["market_risk_off", "market_risk_off"]
-

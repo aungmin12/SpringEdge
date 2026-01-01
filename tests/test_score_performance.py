@@ -7,7 +7,12 @@ def test_fetch_score_name_groups_missing_table_is_empty_not_error():
     conn = sqlite3.connect(":memory:")
     df = fetch_score_name_groups(conn, table="score_performance_evaluation")
     assert df.empty
-    assert df.columns.tolist() == ["horizon_days", "regime_label", "n_scores", "score_names"]
+    assert df.columns.tolist() == [
+        "horizon_days",
+        "regime_label",
+        "n_scores",
+        "score_names",
+    ]
 
 
 def test_fetch_average_returns_by_horizon_groups_and_rounds():
@@ -54,7 +59,9 @@ def test_fetch_actionable_score_names_filters_all_criteria_and_all_regimes():
             ("zeta", 365, "risk_off", 0.01, 2.0, 0.10),  # fails A in this regime
         ],
     )
-    out = fetch_actionable_score_names(conn, table="score_performance_evaluation", horizon_days=365)
+    out = fetch_actionable_score_names(
+        conn, table="score_performance_evaluation", horizon_days=365
+    )
     assert out == ["alpha"]
 
 
@@ -106,7 +113,9 @@ def test_fetch_actionable_score_names_sql_failure_rolls_back_and_falls_back_to_d
 
             # Any query while aborted should raise the typical psycopg behavior.
             if self._conn._aborted:
-                raise RuntimeError("current transaction is aborted, commands ignored until end of transaction block")
+                raise RuntimeError(
+                    "current transaction is aborted, commands ignored until end of transaction block"
+                )
 
             # Fallback SELECT succeeds.
             self.description = [
@@ -142,6 +151,7 @@ def test_fetch_actionable_score_names_sql_failure_rolls_back_and_falls_back_to_d
             self._aborted = False
 
     conn = _FakePsycopgConn()
-    out = fetch_actionable_score_names(conn, table="score_performance_evaluation", horizon_days=365)
+    out = fetch_actionable_score_names(
+        conn, table="score_performance_evaluation", horizon_days=365
+    )
     assert out == ["alpha"]
-

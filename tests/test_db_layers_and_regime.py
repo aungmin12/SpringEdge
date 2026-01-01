@@ -62,7 +62,9 @@ def test_fetch_regime_daily_and_quarterly_profile_highlights_dominant_last_quart
         pd.DataFrame(
             {
                 "quarter": ["2024Q4", "2024Q4"],
-                "regime": pd.Series(["risk_on_low_vol", "risk_off_mid_vol"], dtype="string"),
+                "regime": pd.Series(
+                    ["risk_on_low_vol", "risk_off_mid_vol"], dtype="string"
+                ),
                 "n_days": [3, 2],
                 "is_dominant": pd.Series([True, False], dtype="boolean"),
             }
@@ -70,7 +72,9 @@ def test_fetch_regime_daily_and_quarterly_profile_highlights_dominant_last_quart
         .sort_values(["n_days", "regime"], ascending=[False, True])
         .reset_index(drop=True)
     )
-    got = profile.sort_values(["n_days", "regime"], ascending=[False, True]).reset_index(drop=True)
+    got = profile.sort_values(
+        ["n_days", "regime"], ascending=[False, True]
+    ).reset_index(drop=True)
     pd.testing.assert_frame_equal(got, expected)
 
 
@@ -144,12 +148,16 @@ def test_fetch_market_regime_daily_and_summarize_market_regime_last_3_months_and
     )
 
     df = fetch_market_regime_daily(conn)
-    counts, summary = summarize_market_regime(df, lookback_days=90, trend_lookback_days=20)
+    counts, summary = summarize_market_regime(
+        df, lookback_days=90, trend_lookback_days=20
+    )
 
     assert summary.dominant_regime == "A"
     assert summary.latest_regime == "B"
     assert summary.latest_streak_days == 10
-    assert summary.total_days == 91  # inclusive window end, 90-day lookback yields 91 points in daily calendar series
+    assert (
+        summary.total_days == 91
+    )  # inclusive window end, 90-day lookback yields 91 points in daily calendar series
     assert set(counts["regime"].tolist()) == {"A", "B"}
 
 

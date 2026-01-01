@@ -48,7 +48,9 @@ class TableLogFormatter(logging.Formatter):
         level_cell = self._crop(level, self._level_width).ljust(self._level_width)
         # Keep the *rightmost* part of long logger names (usually most specific),
         # e.g. "...score_performance" rather than "springedge.score_per..."
-        name_cell = self._crop(name, self._name_width, mode="left").ljust(self._name_width)
+        name_cell = self._crop(name, self._name_width, mode="left").ljust(
+            self._name_width
+        )
         return f"{ts_cell} | {level_cell} | {name_cell} | {msg}"
 
     def format(self, record: logging.LogRecord) -> str:
@@ -97,4 +99,3 @@ def configure_logging(
 
 
 __all__ = ["TableLogFormatter", "configure_logging"]
-

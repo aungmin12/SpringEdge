@@ -24,6 +24,8 @@ except ImportError:  # pragma: no cover (only hit on Python < 3.11)
                     if m.value == value:
                         return m
             return None
+
+
 import re
 from datetime import date, datetime
 from typing import Any
@@ -114,6 +116,7 @@ def fetch_sp500_baseline(
     Returns a DataFrame with a single column named `symbol_col`, sorted and
     de-duplicated.
     """
+
     def _safe_rollback() -> None:
         """
         psycopg/psycopg2 can leave the connection in an aborted transaction state
@@ -163,7 +166,10 @@ def fetch_sp500_baseline(
         candidates = {tn}
         if "." in tn:
             candidates.add(tn.split(".")[-1])
-        return any((f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg) for c in candidates)
+        return any(
+            (f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg)
+            for c in candidates
+        )
 
     def _missing_column_error(err: Exception, *, column_name: str) -> bool:
         """
@@ -173,9 +179,13 @@ def fetch_sp500_baseline(
         """
         msg = str(err).lower()
         cn = str(column_name).lower()
-        return (f'column "{cn}" does not exist' in msg) or (f"no such column: {cn}" in msg)
+        return (f'column "{cn}" does not exist' in msg) or (
+            f"no such column: {cn}" in msg
+        )
 
-    def _run_query(*, _table: str, _symbol_col: str, _as_of_col: str | None) -> pd.DataFrame:
+    def _run_query(
+        *, _table: str, _symbol_col: str, _as_of_col: str | None
+    ) -> pd.DataFrame:
         t = _validate_table_ref(_table, kind="table")
         sym = _validate_ident(_symbol_col, kind="column")
         asofc = _validate_ident(_as_of_col, kind="column") if _as_of_col else None
@@ -227,19 +237,27 @@ def fetch_sp500_baseline(
             last_exc: Exception | None = None
             for cand in candidates:
                 try:
-                    return _run_query(_table=cand, _symbol_col=symbol_col, _as_of_col=as_of_col)
+                    return _run_query(
+                        _table=cand, _symbol_col=symbol_col, _as_of_col=as_of_col
+                    )
                 except Exception as exc2:
                     last_exc = exc2
                     _safe_rollback()
-                    if as_of_col is not None and _missing_column_error(exc2, column_name=as_of_col):
-                        return _run_query(_table=cand, _symbol_col=symbol_col, _as_of_col=None)
+                    if as_of_col is not None and _missing_column_error(
+                        exc2, column_name=as_of_col
+                    ):
+                        return _run_query(
+                            _table=cand, _symbol_col=symbol_col, _as_of_col=None
+                        )
             if last_exc is not None:
                 raise last_exc
             raise
         raise
 
 
-def calendar_days_to_trading_days(days: int, *, trading_days_per_year: int = 252) -> int:
+def calendar_days_to_trading_days(
+    days: int, *, trading_days_per_year: int = 252
+) -> int:
     """
     Convert calendar days to approximate trading days.
 
@@ -249,4 +267,3 @@ def calendar_days_to_trading_days(days: int, *, trading_days_per_year: int = 252
     if days <= 0:
         raise ValueError("days must be positive")
     return int(round(days * trading_days_per_year / 365.0))
-
