@@ -3,12 +3,26 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import sys
 from typing import Any, Sequence
 
 import pandas as pd
 
-from .db import db_connection
-from .layers import _validate_table_ref
+# This module is primarily intended to be run/imported as part of the `springedge`
+# package. However, some users run `python3 edge.py ...` from inside `src/springedge/`,
+# which imports this file without a known parent package. In that case, relative
+# imports fail. We fall back to importing via the `springedge.*` package after
+# ensuring `.../src` is on `sys.path`.
+try:
+    from .db import db_connection
+    from .layers import _validate_table_ref
+except ImportError:
+    _src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))  # .../src
+    if _src_dir not in sys.path:
+        sys.path.insert(0, _src_dir)
+    from springedge.db import db_connection  # type: ignore
+    from springedge.layers import _validate_table_ref  # type: ignore
 
 _LOG = logging.getLogger(__name__)
 
