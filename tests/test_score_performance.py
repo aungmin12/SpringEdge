@@ -24,10 +24,41 @@ def test_fetch_actionable_score_names_filters_all_criteria_and_all_regimes():
             ("gamma", 365, "risk_on", 0.20, 1.0, 0.20),  # fails B
             ("delta", 365, "risk_on", 0.20, 2.0, 0.01),  # fails C
             ("epsilon", 21, "risk_on", 0.50, 10.0, 0.50),  # wrong horizon
+            # Passes thresholds in one regime but fails in another; should be excluded by default (ALL regimes).
+            ("zeta", 365, "risk_on", 0.20, 2.0, 0.10),
+            ("zeta", 365, "risk_off", 0.01, 2.0, 0.10),  # fails A in this regime
         ],
     )
     out = fetch_actionable_score_names(conn, table="score_performance_evaluation", horizon_days=365)
     assert out == ["alpha"]
+
+
+def test_fetch_actionable_score_names_any_regime_matches_distinct_row_filtering():
+    """
+    SQL like:
+      SELECT DISTINCT score_name FROM ... WHERE <thresholds>
+    is equivalent to "any regime row passes" when regime rows exist.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "create table score_performance_evaluation (score_name text, horizon_days integer, regime_label text, spearman_ic real, ic_ir real, q5_minus_q1 real)"
+    )
+    conn.executemany(
+        "insert into score_performance_evaluation (score_name, horizon_days, regime_label, spearman_ic, ic_ir, q5_minus_q1) values (?, ?, ?, ?, ?, ?)",
+        [
+            ("alpha", 365, "risk_on", 0.12, 1.6, 0.06),
+            ("alpha", 365, "risk_off", 0.11, 1.7, 0.055),
+            ("zeta", 365, "risk_on", 0.20, 2.0, 0.10),
+            ("zeta", 365, "risk_off", 0.01, 2.0, 0.10),  # fails A in this regime
+        ],
+    )
+    out = fetch_actionable_score_names(
+        conn,
+        table="score_performance_evaluation",
+        horizon_days=365,
+        require_all_regimes=False,
+    )
+    assert out == ["alpha", "zeta"]
 
 
 def test_fetch_actionable_score_names_sql_failure_rolls_back_and_falls_back_to_df():

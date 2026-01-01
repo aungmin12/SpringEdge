@@ -522,11 +522,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--horizon-days", type=int, default=365, help="Horizon (days) used for actionable filtering. Default: 365.")
     # Intentionally hard-coded actionable thresholds to keep CLI simple.
     # If you need configurability, call `fetch_actionable_score_names(...)` directly.
-    p.add_argument(
-        "--any-regime",
-        action="store_true",
-        help="If set, a score is actionable if it passes in ANY regime row (default requires ALL regimes).",
+    regime_group = p.add_mutually_exclusive_group()
+    regime_group.add_argument(
+        "--all-regimes",
+        dest="regime_mode",
+        action="store_const",
+        const="all",
+        help=(
+            "Require a score to pass the actionable thresholds in ALL regime rows "
+            "(stricter; previously the default)."
+        ),
     )
+    regime_group.add_argument(
+        "--any-regime",
+        dest="regime_mode",
+        action="store_const",
+        const="any",
+        help=(
+            "A score is actionable if it passes in ANY regime row. "
+            "This is now the default (matches SQL like `SELECT DISTINCT score_name ... WHERE ...`)."
+        ),
+    )
+    p.set_defaults(regime_mode="any")
     args = p.parse_args(list(argv) if argv is not None else None)
 
     level = getattr(logging, str(args.log_level).upper(), logging.INFO)
@@ -574,7 +591,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             pass
     else:
         if args.actionable:
-            _LOG.info("Filtering actionable score names (table=%s horizon_days=%s).", args.table, args.horizon_days)
+            _LOG.info(
+                "Filtering actionable score names (table=%s horizon_days=%s regime_mode=%s).",
+                args.table,
+                args.horizon_days,
+                args.regime_mode,
+            )
         else:
             _LOG.info("Fetching score performance groups (table=%s).", args.table)
         with db_connection(args.db_url, env_var=args.env_var) as conn:
@@ -583,7 +605,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     conn,
                     table=args.table,
                     horizon_days=args.horizon_days,
-                    require_all_regimes=not args.any_regime,
+                    require_all_regimes=(args.regime_mode == "all"),
                 )
                 df = pd.DataFrame({"score_name": scores})
             else:
