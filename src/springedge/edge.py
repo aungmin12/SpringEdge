@@ -29,9 +29,11 @@ if __name__ == "__main__" and (__package__ is None or __package__ == ""):
     __package__ = "springedge"
 
 import argparse
+import json
 import logging
 import re
 import sys
+from dataclasses import asdict, is_dataclass
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Literal, Sequence
@@ -88,6 +90,288 @@ def _conn_placeholder(conn: Any) -> str:
         return "?"
     # psycopg (v3) and psycopg2 both accept %s
     return "%s"
+
+
+def _is_sqlite_conn(conn: Any) -> bool:
+    mod = str(getattr(conn.__class__, "__module__", "") or "")
+    return "sqlite3" in mod
+
+
+def _json_dumps_safe(obj: Any) -> str:
+    """
+    Best-effort JSON serializer for dataclasses + numpy scalars.
+    """
+
+    def _default(o: Any) -> Any:
+        if is_dataclass(o):
+            return asdict(o)
+        # numpy scalars
+        if hasattr(o, "item"):
+            try:
+                return o.item()
+            except Exception:
+                pass
+        raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+    return json.dumps(obj, default=_default, sort_keys=True)
+
+
+def ensure_topdown_evaluation_tables(
+    conn: Any,
+    *,
+    run_table: str = "topdown_evaluation_run",
+    result_table: str = "topdown_evaluation_result",
+) -> None:
+    """
+    Create tables to persist `TopDownEvaluation` outcomes (portable DB-API DDL).
+
+    Tables:
+    - run_table: one row per evaluation run (params/config JSON)
+    - result_table: one row per (run_id, symbol) result with top-down layer scores
+    """
+    rt = _validate_table_ref(run_table, kind="table")
+    res_t = _validate_table_ref(result_table, kind="table")
+
+    cur = conn.cursor()
+    try:
+        if _is_sqlite_conn(conn):
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {rt} (
+                  run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  evaluation_json TEXT,
+                  params_json TEXT,
+                  notes TEXT
+                )
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {res_t} (
+                  run_id INTEGER NOT NULL,
+                  symbol TEXT NOT NULL,
+                  as_of_date TEXT NOT NULL,
+                  regime TEXT,
+                  edge_score_topdown REAL,
+                  topdown_gate REAL,
+                  layer_z_quality_365 REAL,
+                  layer_z_structural_63_126 REAL,
+                  layer_z_confirm_30 REAL,
+                  layer_z_trigger_21 REAL,
+                  layer_z_micro_7 REAL,
+                  extras_json TEXT,
+                  PRIMARY KEY (run_id, symbol),
+                  FOREIGN KEY (run_id) REFERENCES {rt}(run_id)
+                )
+                """
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{result_table.split('.')[-1]}_run_id ON {res_t}(run_id)"
+            )
+        else:
+            # Postgres-ish (psycopg/psycopg2) DDL.
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {rt} (
+                  run_id BIGSERIAL PRIMARY KEY,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                  evaluation_json JSONB,
+                  params_json JSONB,
+                  notes TEXT
+                )
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {res_t} (
+                  run_id BIGINT NOT NULL REFERENCES {rt}(run_id),
+                  symbol TEXT NOT NULL,
+                  as_of_date DATE NOT NULL,
+                  regime TEXT,
+                  edge_score_topdown DOUBLE PRECISION,
+                  topdown_gate DOUBLE PRECISION,
+                  layer_z_quality_365 DOUBLE PRECISION,
+                  layer_z_structural_63_126 DOUBLE PRECISION,
+                  layer_z_confirm_30 DOUBLE PRECISION,
+                  layer_z_trigger_21 DOUBLE PRECISION,
+                  layer_z_micro_7 DOUBLE PRECISION,
+                  extras_json JSONB,
+                  PRIMARY KEY (run_id, symbol)
+                )
+                """
+            )
+            idx_name = f"idx_{result_table.split('.')[-1]}_run_id"
+            cur.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {res_t}(run_id)")
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    try:
+        if hasattr(conn, "commit"):
+            conn.commit()
+    except Exception:
+        pass
+
+
+def persist_topdown_evaluation(
+    conn: Any,
+    scored_candidates: pd.DataFrame,
+    *,
+    evaluation: TopDownEvaluation,
+    params: dict[str, Any] | None = None,
+    run_table: str = "topdown_evaluation_run",
+    result_table: str = "topdown_evaluation_result",
+    notes: str | None = None,
+) -> int:
+    """
+    Persist `TopDownEvaluation` output rows and return the created run_id.
+    """
+    ensure_topdown_evaluation_tables(conn, run_table=run_table, result_table=result_table)
+
+    rt = _validate_table_ref(run_table, kind="table")
+    res_t = _validate_table_ref(result_table, kind="table")
+    ph = _conn_placeholder(conn)
+
+    # Minimal stable result fields (topdown-only).
+    required = [
+        "symbol",
+        "date",
+        "edge_score_topdown",
+        "topdown_gate",
+        "layer_z_quality_365",
+        "layer_z_structural_63_126",
+        "layer_z_confirm_30",
+        "layer_z_trigger_21",
+        "layer_z_micro_7",
+    ]
+    missing = [c for c in ("symbol", "date") if c not in scored_candidates.columns]
+    if missing:
+        raise ValueError(f"scored_candidates missing required columns: {missing}")
+
+    df = scored_candidates.copy()
+    # Normalize types for DB-API drivers (avoid pandas Timestamp objects).
+    df["symbol"] = df["symbol"].astype("string")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    evaluation_payload = asdict(evaluation)
+    params_payload = dict(params or {})
+
+    cur = conn.cursor()
+    try:
+        if _is_sqlite_conn(conn):
+            cur.execute(
+                f"""
+                INSERT INTO {rt} (evaluation_json, params_json, notes)
+                VALUES ({ph}, {ph}, {ph})
+                """,
+                (
+                    _json_dumps_safe(evaluation_payload),
+                    _json_dumps_safe(params_payload),
+                    str(notes) if notes is not None else None,
+                ),
+            )
+            run_id = int(getattr(cur, "lastrowid", 0) or 0)
+        else:
+            cur.execute(
+                f"""
+                INSERT INTO {rt} (evaluation_json, params_json, notes)
+                VALUES ({ph}::jsonb, {ph}::jsonb, {ph})
+                RETURNING run_id
+                """,
+                (
+                    _json_dumps_safe(evaluation_payload),
+                    _json_dumps_safe(params_payload),
+                    str(notes) if notes is not None else None,
+                ),
+            )
+            row = cur.fetchone()
+            run_id = int(row[0]) if row else 0
+
+        if not run_id:
+            raise RuntimeError("Failed to create topdown evaluation run_id")
+
+        # Optional extra context fields (stored as JSON to keep schema stable).
+        extra_cols = [c for c in ("regime_id", "risk_on_off", "vol_regime") if c in df.columns]
+
+        rows: list[tuple[Any, ...]] = []
+        for r in df.itertuples(index=False):
+            # Use getattr to tolerate optional columns.
+            sym = str(getattr(r, "symbol"))
+            dt = getattr(r, "date")
+            as_of = (
+                dt.date().isoformat()
+                if isinstance(dt, datetime)
+                else (dt.date().isoformat() if hasattr(dt, "date") else str(dt))
+            )
+            regime = getattr(r, "regime", None)
+            extras: dict[str, Any] = {}
+            for c in extra_cols:
+                extras[c] = getattr(r, c, None)
+            extras_json = _json_dumps_safe(extras) if extras else None
+
+            def _f(name: str) -> float | None:
+                if name not in df.columns:
+                    return None
+                v = getattr(r, name)
+                try:
+                    fv = float(v)
+                    return fv if np.isfinite(fv) else None
+                except Exception:
+                    return None
+
+            rows.append(
+                (
+                    int(run_id),
+                    sym,
+                    as_of,
+                    str(regime) if regime is not None else None,
+                    _f("edge_score_topdown"),
+                    _f("topdown_gate"),
+                    _f("layer_z_quality_365"),
+                    _f("layer_z_structural_63_126"),
+                    _f("layer_z_confirm_30"),
+                    _f("layer_z_trigger_21"),
+                    _f("layer_z_micro_7"),
+                    extras_json,
+                )
+            )
+
+        cols_sql = """
+          run_id,
+          symbol,
+          as_of_date,
+          regime,
+          edge_score_topdown,
+          topdown_gate,
+          layer_z_quality_365,
+          layer_z_structural_63_126,
+          layer_z_confirm_30,
+          layer_z_trigger_21,
+          layer_z_micro_7,
+          extras_json
+        """
+        extras_expr = f"{ph}" if _is_sqlite_conn(conn) else f"{ph}::jsonb"
+        insert_sql = (
+            f"INSERT INTO {res_t} ({cols_sql}) VALUES "
+            f"({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {extras_expr})"
+        )
+
+        cur.executemany(insert_sql, rows)
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    try:
+        if hasattr(conn, "commit"):
+            conn.commit()
+    except Exception:
+        pass
+    return int(run_id)
 
 
 def fetch_ohlcv_daily(
@@ -1038,6 +1322,10 @@ def run_edge(
     # evaluation / indicator application
     evaluation: EdgeEvaluation | None = None,
     candidates_as_of: str | date | datetime | None = None,
+    # persistence (TopDownEvaluation only)
+    persist_topdown: bool = False,
+    topdown_run_table: str = "topdown_evaluation_run",
+    topdown_result_table: str = "topdown_evaluation_result",
     # market regime (DB)
     market_regime_table: str = "market_regime_daily",
     market_regime_date_col: str = "analysis_date",
@@ -1246,6 +1534,43 @@ def run_edge(
             len(scored),
             "edge_score" in scored.columns,
         )
+        # Optional persistence for the top-down strategy.
+        if persist_topdown and isinstance(evaluation, TopDownEvaluation):
+            run_id = persist_topdown_evaluation(
+                c,
+                scored,
+                evaluation=evaluation,
+                params={
+                    "baseline_table": baseline_table,
+                    "baseline_symbol_col": baseline_symbol_col,
+                    "baseline_as_of_col": baseline_as_of_col,
+                    "baseline_as_of": _as_iso_date(baseline_as_of)
+                    if baseline_as_of is not None
+                    else None,
+                    "ohlcv_table": ohlcv_table,
+                    "ohlcv_symbol_col": ohlcv_symbol_col,
+                    "ohlcv_date_col": ohlcv_date_col,
+                    "ohlcv_start": _as_iso_date(ohlcv_start)
+                    if ohlcv_start is not None
+                    else None,
+                    "ohlcv_end": _as_iso_date(ohlcv_end) if ohlcv_end is not None else None,
+                    "universe": universe,
+                    "horizon_days": list(horizon_days) if horizon_days is not None else None,
+                    "horizon_basis": horizon_basis,
+                    "candidates_as_of": _as_iso_date(candidates_as_of)
+                    if candidates_as_of is not None
+                    else None,
+                },
+                run_table=topdown_run_table,
+                result_table=topdown_result_table,
+            )
+            scored = scored.copy()
+            scored["topdown_run_id"] = int(run_id)
+            _LOG.info(
+                "run_edge: persisted TopDownEvaluation results (run_id=%d table=%s)",
+                int(run_id),
+                topdown_result_table,
+            )
         return scored
 
     if conn is not None:
@@ -1276,6 +1601,7 @@ def _run_and_print_edge(
     args: argparse.Namespace,
     baseline_as_of_col: str | None,
     horizon_days: tuple[int, ...] | None,
+    evaluation: EdgeEvaluation | TopDownEvaluation | None = None,
 ) -> int:
     out = run_edge(
         conn=conn,
@@ -1292,6 +1618,10 @@ def _run_and_print_edge(
         horizon_days=horizon_days,
         horizon_basis=args.horizon_basis,
         candidates_as_of=args.candidates_as_of,
+        evaluation=evaluation if isinstance(evaluation, (EdgeEvaluation, TopDownEvaluation)) else None,
+        persist_topdown=bool(getattr(args, "persist_topdown", False)),
+        topdown_run_table=str(getattr(args, "topdown_run_table", "topdown_evaluation_run")),
+        topdown_result_table=str(getattr(args, "topdown_result_table", "topdown_evaluation_result")),
     )
 
     score_groups: Any = None
@@ -1385,6 +1715,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--demo",
         action="store_true",
         help="Run a self-contained sqlite demo (no external DB required).",
+    )
+    p.add_argument(
+        "--topdown",
+        action="store_true",
+        help="Use the top-down multi-horizon evaluation strategy (TopDownEvaluation).",
+    )
+    p.add_argument(
+        "--persist-topdown",
+        action="store_true",
+        help="Persist TopDownEvaluation results into DB tables.",
+    )
+    p.add_argument(
+        "--topdown-run-table",
+        default="topdown_evaluation_run",
+        help="Run-metadata table for persisted TopDownEvaluation outputs.",
+    )
+    p.add_argument(
+        "--topdown-result-table",
+        default="topdown_evaluation_result",
+        help="Result table for persisted TopDownEvaluation outputs.",
     )
     p.add_argument(
         "--score-performance",
@@ -1585,7 +1935,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.baseline_as_of is None:
             args.baseline_as_of = "2024-02-01"
         if horizon_days is None:
-            horizon_days = (7, 21)
+            horizon_days = (7, 21, 30, 63, 126, 365) if args.topdown else (7, 21)
+
+        evaluation: EdgeEvaluation | TopDownEvaluation | None = None
+        if args.topdown:
+            evaluation = TopDownEvaluation()
 
         try:
             return _run_and_print_edge(
@@ -1593,6 +1947,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args=args,
                 baseline_as_of_col=baseline_as_of_col,
                 horizon_days=horizon_days,
+                evaluation=evaluation,
             )
         finally:
             try:
@@ -1601,11 +1956,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pass
 
     with db_connection(args.db_url, env_var=args.db_env_var) as conn:
+        evaluation: EdgeEvaluation | TopDownEvaluation | None = (
+            TopDownEvaluation() if args.topdown else None
+        )
         return _run_and_print_edge(
             conn,
             args=args,
             baseline_as_of_col=baseline_as_of_col,
             horizon_days=horizon_days,
+            evaluation=evaluation,
         )
 
 

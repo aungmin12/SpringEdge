@@ -333,11 +333,15 @@ def test_run_edge_end_to_end_with_topdown_evaluation():
         horizon_days=(7, 21, 30, 63, 126, 365),
         horizon_basis="calendar",
         evaluation=TopDownEvaluation(),
+        persist_topdown=True,
+        topdown_run_table="topdown_evaluation_run",
+        topdown_result_table="topdown_evaluation_result",
     )
 
     assert "edge_score" in out.columns
     assert "edge_score_topdown" in out.columns
     assert "topdown_gate" in out.columns
+    assert "topdown_run_id" in out.columns
     for c in [
         "layer_z_quality_365",
         "layer_z_structural_63_126",
@@ -346,3 +350,39 @@ def test_run_edge_end_to_end_with_topdown_evaluation():
         "layer_z_micro_7",
     ]:
         assert c in out.columns
+
+    # Persisted tables exist and contain one row per symbol for the run.
+    run_id = int(out["topdown_run_id"].iloc[0])
+    assert run_id > 0
+    cur = conn.cursor()
+    try:
+        n_runs = cur.execute(
+            "select count(*) from topdown_evaluation_run where run_id = ?",
+            (run_id,),
+        ).fetchone()[0]
+        assert n_runs == 1
+
+        n_results = cur.execute(
+            "select count(*) from topdown_evaluation_result where run_id = ?",
+            (run_id,),
+        ).fetchone()[0]
+        assert n_results == 2
+
+        # Spot-check required columns are present by selecting them.
+        row = cur.execute(
+            """
+            select
+              symbol,
+              as_of_date,
+              edge_score_topdown,
+              topdown_gate,
+              layer_z_quality_365
+            from topdown_evaluation_result
+            where run_id = ?
+            order by symbol
+            """,
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+    finally:
+        cur.close()
