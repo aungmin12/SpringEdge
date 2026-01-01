@@ -393,10 +393,9 @@ def fetch_score_name_groups(
     table: str = "score_performance_evaluation",
 ) -> pd.DataFrame:
     """
-    Fetch distinct `score_name` values grouped by `horizon_days` and `regime_label`.
+    Fetch distinct `score_name` values grouped by `regime_label`.
 
     Returns a DataFrame with columns:
-      - horizon_days (int)
       - regime_label (string)
       - n_scores (int)
       - score_names (list[str])
@@ -464,34 +463,32 @@ def fetch_score_name_groups(
             raise
 
     if raw.empty:
-        return pd.DataFrame(columns=["horizon_days", "regime_label", "n_scores", "score_names"])
+        return pd.DataFrame(columns=["regime_label", "n_scores", "score_names"])
 
     raw["score_name"] = raw["score_name"].astype("string")
     raw["regime_label"] = raw["regime_label"].astype("string")
     raw["horizon_days"] = pd.to_numeric(raw["horizon_days"], errors="coerce").astype("Int64")
     raw = raw.dropna(subset=["score_name", "horizon_days", "regime_label"]).copy()
     if raw.empty:
-        return pd.DataFrame(columns=["horizon_days", "regime_label", "n_scores", "score_names"])
+        return pd.DataFrame(columns=["regime_label", "n_scores", "score_names"])
 
     grouped = (
-        raw.groupby(["horizon_days", "regime_label"], dropna=False, sort=True)["score_name"]
+        raw.groupby(["regime_label"], dropna=False, sort=True)["score_name"]
         .apply(lambda s: sorted(set(s.dropna().astype(str).tolist())))
         .rename("score_names")
         .reset_index()
     )
     grouped["n_scores"] = grouped["score_names"].apply(len).astype("int64")
-    grouped = grouped[["horizon_days", "regime_label", "n_scores", "score_names"]].sort_values(
-        ["horizon_days", "regime_label"],
+    grouped = grouped[["regime_label", "n_scores", "score_names"]].sort_values(
+        ["regime_label"],
         kind="mergesort",
     )
-    # Convert Int64 -> int where possible for cleaner display.
-    grouped["horizon_days"] = grouped["horizon_days"].astype("int64")
     return grouped.reset_index(drop=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """
-    CLI entrypoint: print distinct `score_name` values grouped by horizon/regime as JSON.
+    CLI entrypoint: print distinct `score_name` values grouped by regime_label as JSON.
 
     Examples:
       - Demo (no DB required):
@@ -503,7 +500,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     p = argparse.ArgumentParser(
         prog="springedge.score_performance",
-        description="Fetch distinct score_name values grouped by horizon_days and regime_label.",
+        description="Fetch distinct score_name values grouped by regime_label.",
     )
     p.add_argument("--log-level", default="INFO", help="Logging level (e.g. DEBUG, INFO). Default: INFO.")
     p.add_argument("--demo", action="store_true", help="Run a self-contained sqlite demo (no external DB required).")
@@ -617,7 +614,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         payload = [
             {
-                "horizon_days": int(row.horizon_days),
                 "regime_label": str(row.regime_label),
                 "n_scores": int(row.n_scores),
                 "score_names": list(row.score_names),
