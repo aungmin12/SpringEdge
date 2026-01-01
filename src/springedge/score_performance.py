@@ -140,6 +140,13 @@ def _fetch_actionable_score_names_sql(
     if ("psycopg" not in conn_mod) and ("psycopg2" not in conn_mod):
         return None
 
+    def _safe_rollback() -> None:
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+        except Exception:
+            pass
+
     unit = str(q5_q1_unit or "auto").strip().lower()
     if unit == "auto":
         return None
@@ -196,6 +203,10 @@ def _fetch_actionable_score_names_sql(
             # attempt a generic rewrite here. Fall back to pandas path.
             return None
         except Exception:
+            # If the SQL attempt fails on Postgres, the transaction may now be aborted.
+            # We must rollback before falling back to the pandas path to avoid
+            # psycopg.errors.InFailedSqlTransaction on the next execute().
+            _safe_rollback()
             return None
         rows = cur.fetchall()
     finally:
