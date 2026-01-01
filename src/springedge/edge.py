@@ -816,25 +816,16 @@ def run_edge(
                             score_col="regime_score",
                         )
                         share = (summary.dominant_days / float(summary.total_days)) if summary.total_days else 0.0
-                        slope_str = (
-                            ("%.6f" % summary.recent_score_slope)
-                            if isinstance(summary.recent_score_slope, float)
-                            else "None"
-                        )
+                        share20 = float(summary.recent_share_latest) if summary.recent_share_latest is not None else 0.0
+                        slope = summary.recent_score_slope
+                        slope_str = f"{float(slope):+.6f}" if slope is not None and np.isfinite(float(slope)) else "n/a"
+
+                        # Multi-line, human-friendly summary for logs.
                         regime_summary_msg = (
-                            "dominant last 3 months (as-of %s): %s (%d/%d=%.1f%%). "
-                            "latest trend: %s streak=%dd share_latest_20d=%.2f score_slope_20d=%s"
-                            % (
-                                summary.as_of,
-                                summary.dominant_regime,
-                                summary.dominant_days,
-                                summary.total_days,
-                                100.0 * share,
-                                summary.latest_regime,
-                                summary.latest_streak_days,
-                                summary.recent_share_latest,
-                                slope_str,
-                            )
+                            "run_edge: market regime summary (last ~3 months)\n"
+                            f"  as_of: {summary.as_of}\n"
+                            f"  dominant: {summary.dominant_regime} ({summary.dominant_days}/{summary.total_days}={100.0 * share:.1f}%)\n"
+                            f"  latest: {summary.latest_regime} (streak {summary.latest_streak_days}d, share_last_20d={100.0 * share20:.1f}%, score_slope_20d={slope_str})"
                         )
                     except Exception:
                         regime_summary_msg = None
@@ -864,7 +855,7 @@ def run_edge(
 
         candidates = build_candidate_list(feats, symbol_col="symbol", date_col="date", as_of=candidates_as_of)
         if regime_summary_msg:
-            _LOG.info("run_edge: candidates=%d. %s", len(candidates), regime_summary_msg)
+            _LOG.info("run_edge: candidates=%d\n%s", len(candidates), regime_summary_msg)
         else:
             _LOG.info("run_edge: candidates=%d", len(candidates))
         scored = apply_indicators_to_candidates(candidates, evaluation=evaluation)
