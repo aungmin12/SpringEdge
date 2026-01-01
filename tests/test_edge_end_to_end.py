@@ -384,5 +384,9 @@ def test_run_edge_end_to_end_with_topdown_evaluation():
             (run_id,),
         ).fetchone()
         assert row is not None
+        # These should persist as concrete values (not SQL NULL).
+        assert row[2] is not None  # edge_score_topdown
+        assert row[3] is not None  # topdown_gate
+        assert row[4] is not None  # layer_z_quality_365
     finally:
         cur.close()
