@@ -1,9 +1,6 @@
 import sqlite3
 
-from springedge.score_performance import (
-    fetch_actionable_score_names,
-    fetch_score_name_groups,
-)
+from springedge.score_performance import fetch_actionable_score_names, fetch_average_returns_by_horizon, fetch_score_name_groups
 
 
 def test_fetch_score_name_groups_missing_table_is_empty_not_error():
@@ -15,6 +12,31 @@ def test_fetch_score_name_groups_missing_table_is_empty_not_error():
         "regime_label",
         "n_scores",
         "score_names",
+    ]
+
+
+def test_fetch_average_returns_by_horizon_groups_and_rounds():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "create table score_performance_evaluation (horizon_days integer, mean_return real, median_return real)"
+    )
+    conn.executemany(
+        "insert into score_performance_evaluation (horizon_days, mean_return, median_return) values (?, ?, ?)",
+        [
+            (7, 1.2, 1.4),
+            (7, 1.6, 1.1),
+            (21, 10.1, 9.9),
+            (21, 9.9, 10.2),
+        ],
+    )
+    df = fetch_average_returns_by_horizon(conn, table="score_performance_evaluation")
+    assert df.columns.tolist() == ["horizon_days", "avg_mean_return", "avg_median_return"]
+
+    # 7d: mean(mean_return)=1.4 -> round=1; mean(median_return)=1.25 -> round=1
+    # 21d: mean(mean_return)=10.0 -> round=10; mean(median_return)=10.05 -> round=10
+    assert df.to_dict(orient="records") == [
+        {"horizon_days": 7, "avg_mean_return": 1.0, "avg_median_return": 1.0},
+        {"horizon_days": 21, "avg_mean_return": 10.0, "avg_median_return": 10.0},
     ]
 
 

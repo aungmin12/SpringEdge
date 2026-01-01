@@ -526,6 +526,91 @@ def fetch_score_name_groups(
     return grouped.reset_index(drop=True)
 
 
+def fetch_average_returns_by_horizon(
+    conn: Any,
+    *,
+    table: str = "score_performance_evaluation",
+) -> pd.DataFrame:
+    """
+    Fetch average returns grouped by `horizon_days`.
+
+    Equivalent to (portable SQL):
+      SELECT
+        horizon_days,
+        ROUND(AVG(mean_return))  AS avg_mean_return,
+        ROUND(AVG(median_return)) AS avg_median_return
+      FROM <table>
+      GROUP BY horizon_days
+      ORDER BY horizon_days
+
+    Notes:
+    - If `table` is missing, we also try the common schema-qualified name:
+      `intelligence.<table>` (or the unqualified tail if `table` is qualified).
+    - If both are missing, returns an empty DataFrame.
+    """
+
+    def _safe_rollback() -> None:
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+        except Exception:
+            pass
+
+    def _run_query(*, _table: str) -> pd.DataFrame:
+        t = _validate_table_ref(_table, kind="table")
+        sql = f"""
+        SELECT
+          horizon_days,
+          ROUND(AVG(mean_return)) AS avg_mean_return,
+          ROUND(AVG(median_return)) AS avg_median_return
+        FROM {t}
+        GROUP BY horizon_days
+        ORDER BY horizon_days
+        """
+        cur = conn.cursor()
+        try:
+            try:
+                cur.execute(sql)
+            except Exception:
+                _safe_rollback()
+                raise
+            rows = cur.fetchall()
+            cols = [d[0] for d in (cur.description or [])]
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        return pd.DataFrame.from_records(rows, columns=cols)
+
+    try:
+        out = _run_query(_table=table)
+    except Exception as exc:
+        _safe_rollback()
+        if not _missing_table_error(exc, table_name=table):
+            raise
+
+        fallback = "intelligence." + str(table) if "." not in str(table) else str(table).split(".")[-1]
+        try:
+            out = _run_query(_table=fallback)
+        except Exception as exc2:
+            _safe_rollback()
+            if _missing_table_error(exc2, table_name=fallback):
+                return pd.DataFrame(columns=["horizon_days", "avg_mean_return", "avg_median_return"])
+            raise
+
+    if out.empty:
+        return pd.DataFrame(columns=["horizon_days", "avg_mean_return", "avg_median_return"])
+
+    # Normalize types for consistent downstream usage.
+    out["horizon_days"] = pd.to_numeric(out["horizon_days"], errors="coerce").astype("Int64")
+    out = out.dropna(subset=["horizon_days"]).copy()
+    if out.empty:
+        return pd.DataFrame(columns=["horizon_days", "avg_mean_return", "avg_median_return"])
+    out["horizon_days"] = out["horizon_days"].astype("int64")
+    return out.reset_index(drop=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """
     CLI entrypoint: print distinct `score_name` values grouped by horizon/regime as JSON.
@@ -689,7 +774,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["fetch_actionable_score_names", "fetch_score_name_groups", "main"]
+__all__ = ["fetch_actionable_score_names", "fetch_average_returns_by_horizon", "fetch_score_name_groups", "main"]
 
 
 if __name__ == "__main__":
