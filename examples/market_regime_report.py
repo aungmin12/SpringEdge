@@ -8,6 +8,7 @@ import pandas as pd
 
 from springedge import db_connection
 from springedge.regime import fetch_market_regime_last_n_days, market_regime_counts_and_trend
+from springedge.logging_utils import configure_logging
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -26,7 +27,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = p.parse_args(list(argv) if argv is not None else None)
 
     level = getattr(logging, str(args.log_level).upper(), logging.INFO)
-    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    configure_logging(level=level)
 
     with db_connection(args.db_url, env_var=args.env_var) as conn:
         df = fetch_market_regime_last_n_days(

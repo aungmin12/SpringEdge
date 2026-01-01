@@ -16,12 +16,14 @@ import pandas as pd
 # ensuring `.../src` is on `sys.path`.
 try:
     from .db import db_connection
+    from .logging_utils import configure_logging
     from .layers import _validate_table_ref
 except ImportError:
     _src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))  # .../src
     if _src_dir not in sys.path:
         sys.path.insert(0, _src_dir)
     from springedge.db import db_connection  # type: ignore
+    from springedge.logging_utils import configure_logging  # type: ignore
     from springedge.layers import _validate_table_ref  # type: ignore
 
 _LOG = logging.getLogger(__name__)
@@ -547,11 +549,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = p.parse_args(list(argv) if argv is not None else None)
 
     level = getattr(logging, str(args.log_level).upper(), logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    configure_logging(level=level)
 
     if args.demo:
         import sqlite3

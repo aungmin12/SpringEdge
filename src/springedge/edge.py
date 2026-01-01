@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 from .db import db_connection
+from .logging_utils import configure_logging
 from .features import EdgeFeatureConfig, compute_edge_features
 from .layers import _as_iso_date, _validate_ident, _validate_table_ref, fetch_sp500_baseline
 from .regime import fetch_market_regime_daily, summarize_market_regime
@@ -1048,11 +1049,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = p.parse_args(list(argv_list))
 
     level = getattr(logging, str(args.log_level).upper(), logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    configure_logging(level=level)
 
     horizon_days = _parse_horizon_days(args.horizon_days)
 
