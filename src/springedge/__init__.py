@@ -17,7 +17,12 @@ from .edge import (
 )
 from .layers import StockUniverse, fetch_sp500_baseline
 from .db import connect_db, db_connection
-from .regime import fetch_regime_daily, quarterly_regime_profile
+from .regime import (
+    fetch_market_regime_last_n_days,
+    fetch_regime_daily,
+    market_regime_counts_and_trend,
+    quarterly_regime_profile,
+)
 
 __all__ = [
     "compute_edge_features",
@@ -30,7 +35,9 @@ __all__ = [
     "run_edge",
     "StockUniverse",
     "fetch_sp500_baseline",
+    "fetch_market_regime_last_n_days",
     "fetch_regime_daily",
+    "market_regime_counts_and_trend",
     "quarterly_regime_profile",
     "connect_db",
     "db_connection",

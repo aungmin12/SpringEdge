@@ -175,6 +175,113 @@ def fetch_market_regime_daily(
         raise
 
 
+def _fetch_max_date(
+    conn: Any,
+    *,
+    table: str,
+    date_col: str,
+) -> str | None:
+    """
+    Fetch MAX(date_col) as ISO date string, with the same table fallback behavior
+    as `fetch_market_regime_daily`.
+    """
+
+    def _safe_rollback() -> None:
+        try:
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+        except Exception:
+            pass
+
+    def _missing_table_error(err: Exception, *, table_name: str) -> bool:
+        msg = str(err).lower()
+        tn = str(table_name).lower()
+        candidates = {tn}
+        if "." in tn:
+            candidates.add(tn.split(".")[-1])
+        return any((f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg) for c in candidates)
+
+    def _run_query(*, _table: str) -> str | None:
+        t = _validate_table_ref(_table, kind="table")
+        d = _validate_ident(date_col, kind="column")
+        sql = f"SELECT MAX({d}) AS max_date FROM {t}"
+        cur = conn.cursor()
+        try:
+            try:
+                cur.execute(sql)
+            except Exception:
+                _safe_rollback()
+                raise
+            row = cur.fetchone()
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if not row:
+            return None
+        v = row[0]
+        if v is None:
+            return None
+        # v may be a string/date/datetime depending on driver
+        return _as_iso_date(v)
+
+    try:
+        return _run_query(_table=table)
+    except Exception as exc:
+        _safe_rollback()
+        candidates = (table, "intelligence.market_regime_daily")
+        last_exc: Exception | None = None
+        for cand in candidates:
+            if cand == table:
+                continue
+            try:
+                return _run_query(_table=cand)
+            except Exception as exc2:
+                last_exc = exc2
+                _safe_rollback()
+                if _missing_table_error(exc2, table_name=cand):
+                    continue
+                break
+        if last_exc is not None and _missing_table_error(exc, table_name=table):
+            raise last_exc
+        raise
+
+
+def fetch_market_regime_last_n_days(
+    conn: Any,
+    *,
+    lookback_days: int = 90,
+    as_of: str | date | datetime | None = None,
+    table: str = "market_regime_daily",
+    analysis_date_col: str = "analysis_date",
+) -> pd.DataFrame:
+    """
+    Fetch rows from `market_regime_daily` for the last N *calendar* days.
+
+    If `as_of` is not provided, uses the latest available analysis_date in the table.
+    """
+    if int(lookback_days) <= 0:
+        raise ValueError("lookback_days must be a positive integer")
+
+    if as_of is None:
+        max_date = _fetch_max_date(conn, table=table, date_col=analysis_date_col)
+        if max_date is None:
+            # Fall back to fetching without filters; caller can decide how to handle empties.
+            return fetch_market_regime_daily(conn, table=table, analysis_date_col=analysis_date_col)
+        as_of = max_date
+
+    end_dt = pd.to_datetime(as_of, errors="raise")
+    start_dt = end_dt - timedelta(days=int(lookback_days))
+    return fetch_market_regime_daily(
+        conn,
+        table=table,
+        analysis_date_col=analysis_date_col,
+        start=start_dt,
+        end=end_dt,
+    )
+
+
 @dataclass(frozen=True)
 class MarketRegimeSummary:
     as_of: str
@@ -288,6 +395,39 @@ def summarize_market_regime(
         recent_score_slope=recent_score_slope,
     )
     return counts, summary
+
+
+def market_regime_counts_and_trend(
+    conn: Any,
+    *,
+    lookback_days: int = 90,
+    trend_days: int = 10,
+    as_of: str | date | datetime | None = None,
+    table: str = "market_regime_daily",
+    analysis_date_col: str = "analysis_date",
+) -> tuple[pd.DataFrame, MarketRegimeSummary]:
+    """
+    Convenience wrapper that:
+    - fetches the last `lookback_days` from `market_regime_daily`
+    - returns counts by `regime_label` (plus shares)
+    - returns a summary with a `trend_days` window (latest regime, streak, etc.)
+    """
+    df = fetch_market_regime_last_n_days(
+        conn,
+        lookback_days=lookback_days,
+        as_of=as_of,
+        table=table,
+        analysis_date_col=analysis_date_col,
+    )
+    return summarize_market_regime(
+        df,
+        as_of=as_of,
+        lookback_days=lookback_days,
+        trend_lookback_days=trend_days,
+        date_col=analysis_date_col,
+        regime_col="regime_label",
+        score_col="regime_score",
+    )
 
 
 @dataclass(frozen=True)
