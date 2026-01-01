@@ -60,6 +60,22 @@ with db_connection() as conn:
     print(cur.fetchone())
 ```
 
+## Table naming (prod vs demo)
+
+By default, `springedge.edge.run_edge()` (and `python3 -m springedge.edge`) expects:
+- baseline universe table: `sp500` (columns: `date`, `symbol`)
+- OHLCV table: `ohlcv_daily` (columns: `symbol`, `date`, `open`, `high`, `low`, `close`, `volume`)
+
+If your production schema uses different names, SpringEdge will automatically fall back for common aliases:
+- `sp500` → `sp500_tickers`
+- `ohlcv_daily` → `prices_daily`
+
+You can also override explicitly:
+
+```bash
+python3 -m springedge.edge --baseline-table sp500_tickers --ohlcv-table prices_daily
+```
+
 Run example:
 
 ```bash
