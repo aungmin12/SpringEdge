@@ -1026,10 +1026,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Keep the CLI output compact and stable.
         with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 200):
             print(shown.to_string(index=False))
-        if score_groups:
-            print("\nScore performance groups:")
-            for k in sorted(score_groups.keys()):
-                print(f"- {k}: {len(score_groups[k])} scores")
+        # `fetch_score_name_groups()` returns a DataFrame, which cannot be used in a boolean
+        # context (pandas raises: "The truth value of a DataFrame is ambiguous.").
+        # Historically this CLI printed a small summary when groups were available; keep the
+        # behavior but make it robust to both DataFrame and dict-like returns.
+        if score_groups is not None:
+            if isinstance(score_groups, pd.DataFrame):
+                if not score_groups.empty:
+                    print("\nScore performance groups:")
+                    with pd.option_context(
+                        "display.max_rows",
+                        None,
+                        "display.max_columns",
+                        None,
+                        "display.width",
+                        200,
+                    ):
+                        print(score_groups.to_string(index=False))
+            elif isinstance(score_groups, dict):
+                if score_groups:
+                    print("\nScore performance groups:")
+                    for k in sorted(score_groups.keys()):
+                        try:
+                            n = len(score_groups[k])
+                        except Exception:
+                            n = 0
+                        print(f"- {k}: {n} scores")
         return 0
 
     if args.demo:
