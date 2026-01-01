@@ -28,7 +28,13 @@ _LOG = logging.getLogger(__name__)
 
 ACTIONABLE_MIN_ABS_SPEARMAN_IC = 0.10
 ACTIONABLE_MIN_IC_IR = 1.5
-ACTIONABLE_MIN_ABS_Q5_MINUS_Q1 = 0.05
+# q5-q1 spread default threshold.
+#
+# Historically this was expressed as a decimal return (0.05 == 5%).
+# Many users think in "percent points", so the default is now expressed as 5.0,
+# while we still *compare* in decimal space internally (see
+# `_normalize_q5_q1_threshold_to_decimals`).
+ACTIONABLE_MIN_ABS_Q5_MINUS_Q1 = 5.0
 
 
 def _missing_table_error(err: Exception, *, table_name: str) -> bool:
@@ -108,6 +114,22 @@ def _normalize_spread_units(x: pd.Series, *, unit: str = "auto") -> pd.Series:
             return s / 100.0
         return s
     raise ValueError(f"Unknown q5-q1 spread unit: {unit!r} (expected 'raw', 'percent_points', or 'auto').")
+
+
+def _normalize_q5_q1_threshold_to_decimals(x: float) -> float:
+    """
+    Normalize the q5-q1 absolute threshold to *decimal* return units.
+
+    For backwards compatibility, callers may provide either:
+    - a decimal return (e.g. 0.05 for 5%)
+    - percent points (e.g. 5.0 for 5%)
+
+    Heuristic:
+    - values with |x| > 1.0 are treated as percent points and divided by 100
+    - otherwise values are treated as already-decimal
+    """
+    v = float(x)
+    return v / 100.0 if abs(v) > 1.0 else v
 
 
 def _fetch_actionable_score_names_sql(
@@ -249,6 +271,8 @@ def fetch_actionable_score_names(
     If `require_all_regimes=True`, a score is actionable only if it passes the criteria
     for every row (typically each regime_label) at the given horizon_days.
     """
+    min_abs_q5_minus_q1_dec = _normalize_q5_q1_threshold_to_decimals(min_abs_q5_minus_q1)
+
     # If the caller provides explicit spread units, we can push the whole filter
     # into SQL for speed and simplicity (and avoid loading the entire table).
     sql_res = _fetch_actionable_score_names_sql(
@@ -257,7 +281,7 @@ def fetch_actionable_score_names(
         horizon_days=horizon_days,
         min_abs_spearman_ic=min_abs_spearman_ic,
         min_ic_ir=min_ic_ir,
-        min_abs_q5_minus_q1=min_abs_q5_minus_q1,
+        min_abs_q5_minus_q1=min_abs_q5_minus_q1_dec,
         require_all_regimes=require_all_regimes,
         q5_q1_unit=q5_q1_unit,
     )
@@ -346,7 +370,11 @@ def fetch_actionable_score_names(
     else:
         spread = _normalize_spread_units(work[q5_col], unit=q5_q1_unit) - _normalize_spread_units(work[q1_col], unit=q5_q1_unit)
 
-    passed = (ic.abs() >= float(min_abs_spearman_ic)) & (ir >= float(min_ic_ir)) & (spread.abs() >= float(min_abs_q5_minus_q1))
+    passed = (
+        (ic.abs() >= float(min_abs_spearman_ic))
+        & (ir >= float(min_ic_ir))
+        & (spread.abs() >= float(min_abs_q5_minus_q1_dec))
+    )
     work["_passed"] = passed.fillna(False)
 
     # If there is no regime column, treat as one row per score_name.
