@@ -91,40 +91,77 @@ def fetch_sp500_baseline(
     Returns a DataFrame with a single column named `symbol_col`, sorted and
     de-duplicated.
     """
-    t = _validate_ident(table, kind="table")
-    sym = _validate_ident(symbol_col, kind="column")
-    asofc = _validate_ident(as_of_col, kind="column") if as_of_col else None
+    def _missing_table_error(err: Exception, *, table_name: str) -> bool:
+        """
+        Best-effort detection of missing table errors across DB drivers.
+        - Postgres (psycopg/psycopg2): relation "x" does not exist
+        - sqlite: no such table: x
+        """
+        msg = str(err).lower()
+        tn = str(table_name).lower()
+        return (f'relation "{tn}" does not exist' in msg) or (f"no such table: {tn}" in msg)
 
-    if asofc is None:
-        sql = f"SELECT DISTINCT {sym} AS {sym} FROM {t}"
-    else:
-        if as_of is None:
-            sql = f"""
-            SELECT {sym} AS {sym}
-            FROM {t}
-            WHERE {asofc} = (SELECT MAX({asofc}) FROM {t})
-            """
+    def _missing_column_error(err: Exception, *, column_name: str) -> bool:
+        """
+        Best-effort detection of missing column errors across DB drivers.
+        - Postgres: column "x" does not exist
+        - sqlite: no such column: x
+        """
+        msg = str(err).lower()
+        cn = str(column_name).lower()
+        return (f'column "{cn}" does not exist' in msg) or (f"no such column: {cn}" in msg)
+
+    def _run_query(*, _table: str, _symbol_col: str, _as_of_col: str | None) -> pd.DataFrame:
+        t = _validate_ident(_table, kind="table")
+        sym = _validate_ident(_symbol_col, kind="column")
+        asofc = _validate_ident(_as_of_col, kind="column") if _as_of_col else None
+
+        if asofc is None:
+            sql = f"SELECT DISTINCT {sym} AS {sym} FROM {t}"
         else:
-            as_of_iso = _as_iso_date(as_of)
-            sql = f"""
-            SELECT {sym} AS {sym}
-            FROM {t}
-            WHERE {asofc} = (
-              SELECT MAX({asofc}) FROM {t} WHERE {asofc} <= '{as_of_iso}'
-            )
-            """
+            if as_of is None:
+                sql = f"""
+                SELECT {sym} AS {sym}
+                FROM {t}
+                WHERE {asofc} = (SELECT MAX({asofc}) FROM {t})
+                """
+            else:
+                as_of_iso = _as_iso_date(as_of)
+                sql = f"""
+                SELECT {sym} AS {sym}
+                FROM {t}
+                WHERE {asofc} = (
+                  SELECT MAX({asofc}) FROM {t} WHERE {asofc} <= '{as_of_iso}'
+                )
+                """
 
-    df = pd.read_sql_query(sql, conn)
-    if sym not in df.columns:
-        # Defensive: if a driver returns uppercased names, fall back to first column.
-        df.columns = [str(c) for c in df.columns]
-        if sym not in df.columns and len(df.columns) == 1:
-            df = df.rename(columns={df.columns[0]: sym})
+        df = pd.read_sql_query(sql, conn)
+        if sym not in df.columns:
+            # Defensive: if a driver returns uppercased names, fall back to first column.
+            df.columns = [str(c) for c in df.columns]
+            if sym not in df.columns and len(df.columns) == 1:
+                df = df.rename(columns={df.columns[0]: sym})
 
-    out = df[[sym]].copy()
-    out[sym] = out[sym].astype("string")
-    out = out.dropna().drop_duplicates().sort_values(sym).reset_index(drop=True)
-    return out
+        out = df[[sym]].copy()
+        out[sym] = out[sym].astype("string")
+        out = out.dropna().drop_duplicates().sort_values(sym).reset_index(drop=True)
+        return out
+
+    # Primary attempt (keeps current defaults/tests working).
+    try:
+        return _run_query(_table=table, _symbol_col=symbol_col, _as_of_col=as_of_col)
+    except Exception as exc:
+        # Production schema compatibility:
+        # - Some DBs use `sp500_tickers` instead of `sp500`.
+        # - Some DBs don't have an as-of snapshot column; accept a "flat list".
+        if table == "sp500" and _missing_table_error(exc, table_name="sp500"):
+            try:
+                return _run_query(_table="sp500_tickers", _symbol_col=symbol_col, _as_of_col=as_of_col)
+            except Exception as exc2:
+                if as_of_col is not None and _missing_column_error(exc2, column_name=as_of_col):
+                    return _run_query(_table="sp500_tickers", _symbol_col=symbol_col, _as_of_col=None)
+                raise
+        raise
 
 
 def calendar_days_to_trading_days(days: int, *, trading_days_per_year: int = 252) -> int:

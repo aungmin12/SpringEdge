@@ -98,6 +98,11 @@ def fetch_ohlcv_daily(
     Returns a DataFrame with canonical column names:
       [symbol, date, open, high, low, close, volume]
     """
+    def _missing_table_error(err: Exception, *, table_name: str) -> bool:
+        msg = str(err).lower()
+        tn = str(table_name).lower()
+        return (f'relation "{tn}" does not exist' in msg) or (f"no such table: {tn}" in msg)
+
     t = _validate_ident(table, kind="table")
     symc = _validate_ident(symbol_col, kind="column")
     dc = _validate_ident(date_col, kind="column")
@@ -137,7 +142,27 @@ def fetch_ohlcv_daily(
     WHERE {where_sql}
     ORDER BY {symc}, {dc}
     """
-    return pd.read_sql_query(sql, conn, params=params)
+    try:
+        return pd.read_sql_query(sql, conn, params=params)
+    except Exception as exc:
+        # Production schema compatibility: some DBs name this table `prices_daily`.
+        if table == "ohlcv_daily" and _missing_table_error(exc, table_name="ohlcv_daily"):
+            # Retry with table alias; keep same column defaults.
+            return fetch_ohlcv_daily(
+                conn,
+                symbols=symbols,
+                table="prices_daily",
+                symbol_col=symbol_col,
+                date_col=date_col,
+                open_col=open_col,
+                high_col=high_col,
+                low_col=low_col,
+                close_col=close_col,
+                volume_col=volume_col,
+                start=start,
+                end=end,
+            )
+        raise
 
 
 @dataclass(frozen=True)
