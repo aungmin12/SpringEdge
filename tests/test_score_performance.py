@@ -18,12 +18,12 @@ def test_fetch_actionable_score_names_filters_all_criteria_and_all_regimes():
     conn.executemany(
         "insert into score_performance_evaluation (score_name, horizon_days, regime_label, spearman_ic, ic_ir, q5_minus_q1) values (?, ?, ?, ?, ?, ?)",
         [
-            ("alpha", 365, "risk_on", 0.12, 1.6, 0.06),
-            ("alpha", 365, "risk_off", 0.11, 1.7, 0.055),
-            ("beta", 365, "risk_on", 0.05, 3.0, 0.20),  # fails A
-            ("gamma", 365, "risk_on", 0.20, 1.0, 0.20),  # fails B
-            ("delta", 365, "risk_on", 0.20, 2.0, 0.01),  # fails C
-            ("epsilon", 21, "risk_on", 0.50, 10.0, 0.50),  # wrong horizon
+            ("alpha", 365, "risk_on", 0.12, 1.6, 6.0),
+            ("alpha", 365, "risk_off", 0.11, 1.7, 5.5),
+            ("beta", 365, "risk_on", 0.05, 3.0, 20.0),  # fails A
+            ("gamma", 365, "risk_on", 0.20, 1.0, 20.0),  # fails B
+            ("delta", 365, "risk_on", 0.20, 2.0, 1.0),  # fails C
+            ("epsilon", 21, "risk_on", 0.50, 10.0, 50.0),  # wrong horizon
         ],
     )
     out = fetch_actionable_score_names(conn, table="score_performance_evaluation", horizon_days=365)

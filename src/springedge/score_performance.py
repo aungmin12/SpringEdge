@@ -28,7 +28,8 @@ _LOG = logging.getLogger(__name__)
 
 ACTIONABLE_MIN_ABS_SPEARMAN_IC = 0.10
 ACTIONABLE_MIN_IC_IR = 1.5
-ACTIONABLE_MIN_ABS_Q5_MINUS_Q1 = 0.05
+# Default expects q5_minus_q1 stored in "raw" float units like 5.0, 10.0, etc.
+ACTIONABLE_MIN_ABS_Q5_MINUS_Q1 = 5.0
 
 
 def _missing_table_error(err: Exception, *, table_name: str) -> bool:
@@ -507,14 +508,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "insert into score_performance_evaluation (score_name, horizon_days, regime_label, spearman_ic, ic_ir, q5_minus_q1) values (?, ?, ?, ?, ?, ?)",
             [
                 # 365d + two regimes
-                ("alpha", 365, "risk_on", 0.12, 1.6, 0.06),
-                ("alpha", 365, "risk_off", 0.11, 1.7, 0.055),
+                ("alpha", 365, "risk_on", 0.12, 1.6, 6.0),
+                ("alpha", 365, "risk_off", 0.11, 1.7, 5.5),
                 # fails A
-                ("beta", 365, "risk_on", 0.05, 3.0, 0.20),
+                ("beta", 365, "risk_on", 0.05, 3.0, 20.0),
                 # fails B
-                ("gamma", 365, "risk_on", 0.20, 1.0, 0.20),
+                ("gamma", 365, "risk_on", 0.20, 1.0, 20.0),
                 # fails C
-                ("delta", 365, "risk_on", 0.20, 2.0, 0.01),
+                ("delta", 365, "risk_on", 0.20, 2.0, 1.0),
             ],
         )
         if args.actionable:
