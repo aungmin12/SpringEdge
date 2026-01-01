@@ -906,7 +906,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # repo-root `edge.py` wrapper).
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     if "--score-performance" in argv_list:
+
         from .score_performance import main as _sp_main
+   
 
         forwarded = [a for a in argv_list if a != "--score-performance"]
         return int(_sp_main(forwarded))
@@ -929,15 +931,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="score_performance_evaluation",
         help="Score performance source table. Default: score_performance_evaluation (also tries intelligence.score_performance_evaluation).",
     )
-
-    # DB / baseline / ohlcv
-    p.add_argument("--db-url", default=None, help="Database URL (overrides env var if provided).")
-    p.add_argument("--env-var", default="SPRINGEDGE_DB_URL", help="Env var containing DB URL. Default: SPRINGEDGE_DB_URL.")
-    p.add_argument("--baseline-table", default="sp500")
-    p.add_argument("--baseline-symbol-col", default="symbol")
-    p.add_argument("--baseline-as-of-col", default="date")
-    p.add_argument("--baseline-as-of", default=None, help="Baseline snapshot as-of date (e.g. 2024-02-01).")
-    p.add_argument("--ohlcv-table", default="core.prices_daily")
     p.add_argument("--ohlcv-symbol-col", default="symbol")
     p.add_argument("--ohlcv-date-col", default="date")
     p.add_argument("--ohlcv-start", default=None, help="OHLCV start date filter (inclusive).")
@@ -974,18 +967,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     score_groups = None
 
-    if args.demo:
-        import sqlite3
-
-        _LOG.info("Running demo sqlite pipeline.")
-        conn = sqlite3.connect(":memory:")
-        # SQLite doesn't support schemas unless you ATTACH another database.
-        # This keeps the demo consistent with the default Postgres table name.
-        conn.execute("ATTACH DATABASE ':memory:' AS core")
-        conn.execute("create table sp500 (date text, symbol text)")
-        conn.execute(
-            "create table core.prices_daily (symbol text, date text, open real, high real, low real, close real, volume real)"
-        )
         conn.executemany(
             "insert into sp500 (date, symbol) values (?, ?)",
             [
@@ -1040,77 +1021,4 @@ def main(argv: Sequence[str] | None = None) -> int:
                 score_groups = fetch_score_name_groups(conn, table=args.score_performance_table)
             except Exception as exc:
                 _LOG.warning("score_performance: skipped (%s)", exc)
-    else:
-        # Use one DB connection for both Edge + score_performance (when enabled).
-        with db_connection(args.db_url, env_var=args.env_var) as conn:
-            out = run_edge(
-                conn=conn,
-                baseline_table=args.baseline_table,
-                baseline_symbol_col=args.baseline_symbol_col,
-                baseline_as_of_col=args.baseline_as_of_col,
-                baseline_as_of=args.baseline_as_of,
-                ohlcv_table=args.ohlcv_table,
-                ohlcv_symbol_col=args.ohlcv_symbol_col,
-                ohlcv_date_col=args.ohlcv_date_col,
-                ohlcv_start=args.ohlcv_start,
-                ohlcv_end=args.ohlcv_end,
-                universe=args.universe,
-                horizon_days=horizon_days,
-                horizon_basis=args.horizon_basis,
-                candidates_as_of=args.candidates_as_of,
-            )
-            if not args.no_score_performance:
-                try:
-                    from .score_performance import fetch_score_name_groups
 
-                    score_groups = fetch_score_name_groups(conn, table=args.score_performance_table)
-                except Exception as exc:
-                    _LOG.warning("score_performance: skipped (%s)", exc)
-
-    if out is None or out.empty:
-        _LOG.warning("No candidates returned.")
-        return 2
-
-    if "edge_score" in out.columns:
-        view = out.sort_values("edge_score", ascending=False, kind="mergesort").reset_index(drop=True)
-    else:
-        view = out.reset_index(drop=True)
-
-    cols = [c for c in ["symbol", "date", "regime", "edge_score"] if c in view.columns]
-    # Add momentum columns if present (nice quick signal).
-    cols += [c for c in view.columns if c.startswith("mom_ret_")]
-    cols = list(dict.fromkeys(cols))  # stable de-dupe
-
-    if args.top and args.top > 0:
-        printable = view.head(args.top)
-    else:
-        printable = view
-
-    print(
-        printable.loc[:, cols].to_string(
-            index=False,
-            float_format=lambda x: f"{x:.6f}",
-        )
-    )
-    if score_groups is not None:
-        try:
-            import json
-
-            payload = [
-                {
-                    "horizon_days": int(row.horizon_days),
-                    "regime_label": str(row.regime_label),
-                    "n_scores": int(row.n_scores),
-                    "score_names": list(row.score_names),
-                }
-                for row in score_groups.itertuples(index=False)
-            ]
-            if payload:
-                print("\nscore_performance_groups=" + json.dumps(payload, indent=2, sort_keys=False))
-        except Exception as exc:
-            _LOG.warning("score_performance: failed to print (%s)", exc)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
