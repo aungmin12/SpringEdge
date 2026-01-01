@@ -11,6 +11,23 @@ This module intentionally stays light-weight:
   regime-aware and horizon-aware way.
 """
 
+# If this file is executed directly (e.g. `python3 src/springedge/edge.py` or
+# running it from within `src/springedge/`), Python does not treat it as part of
+# the `springedge` package, so relative imports like `from .db import ...` fail
+# with: "attempted relative import with no known parent package".
+#
+# We fix that by (1) ensuring `src/` is on sys.path and (2) setting __package__
+# so relative imports resolve correctly. Normal package imports (`python -m
+# springedge.edge` or `import springedge`) are unaffected.
+if __name__ == "__main__" and (__package__ is None or __package__ == ""):
+    import os
+    import sys
+
+    _src = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    __package__ = "springedge"
+
 import argparse
 import logging
 import re
