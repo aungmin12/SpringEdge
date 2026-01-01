@@ -9,4 +9,3 @@ area to keep those import paths stable.
 from __future__ import annotations
 
 __all__ = ["sp500_tickers"]
-

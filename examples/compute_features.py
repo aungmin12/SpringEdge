@@ -6,7 +6,9 @@ import pandas as pd
 from springedge import compute_edge_features
 
 
-def make_toy_ohlcv(symbol: str, start: str = "2020-01-01", n: int = 400) -> pd.DataFrame:
+def make_toy_ohlcv(
+    symbol: str, start: str = "2020-01-01", n: int = 400
+) -> pd.DataFrame:
     dates = pd.bdate_range(start=start, periods=n)
     rng = np.random.default_rng(7)
     rets = rng.normal(0, 0.01, size=n)
@@ -29,7 +31,9 @@ def make_toy_ohlcv(symbol: str, start: str = "2020-01-01", n: int = 400) -> pd.D
 
 
 def main() -> None:
-    ohlcv = pd.concat([make_toy_ohlcv("AAPL"), make_toy_ohlcv("MSFT")], ignore_index=True)
+    ohlcv = pd.concat(
+        [make_toy_ohlcv("AAPL"), make_toy_ohlcv("MSFT")], ignore_index=True
+    )
 
     # Optional proxies/structural can be joined by symbol/date.
     proxies = ohlcv[["symbol", "date"]].copy()
@@ -43,4 +47,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

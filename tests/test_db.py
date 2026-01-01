@@ -1,5 +1,3 @@
-import os
-
 import pytest
 
 from springedge.db import connect_db, db_connection, get_db_url
@@ -41,7 +39,8 @@ def test_connect_db_postgres_requires_driver(monkeypatch: pytest.MonkeyPatch) ->
     except ModuleNotFoundError:
         pass
 
-    monkeypatch.setenv("SPRINGEDGE_DB_URL", "postgresql://user:pass@localhost:5432/dbname")
+    monkeypatch.setenv(
+        "SPRINGEDGE_DB_URL", "postgresql://user:pass@localhost:5432/dbname"
+    )
     with pytest.raises(ModuleNotFoundError):
         connect_db()
-

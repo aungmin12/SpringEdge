@@ -34,7 +34,9 @@ def get_db_url(db_url: str | None = None, *, env_var: str = DEFAULT_DB_URL_ENV) 
     )
 
 
-def connect_db(db_url: str | None = None, *, env_var: str = DEFAULT_DB_URL_ENV, **kwargs: Any) -> Any:
+def connect_db(
+    db_url: str | None = None, *, env_var: str = DEFAULT_DB_URL_ENV, **kwargs: Any
+) -> Any:
     """
     Create a DB-API connection based on a URL.
 
@@ -118,4 +120,3 @@ def db_connection(
         except Exception:
             # Some drivers may not have a standard close() or may already be closed.
             pass
-

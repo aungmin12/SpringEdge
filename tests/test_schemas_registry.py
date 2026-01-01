@@ -56,4 +56,3 @@ def test_schema_registry_contains_expected_tables() -> None:
     assert all_bare == set(CORE_TABLES) | set(INTELLIGENCE_TABLES)
     assert "core.prices_daily" in all_qualified
     assert "intelligence.company_catalysts" in all_qualified
-

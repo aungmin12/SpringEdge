@@ -27,8 +27,9 @@ def fetch_sp500_tickers(
     This is a small wrapper around `springedge.layers.fetch_sp500_baseline`.
     """
 
-    return _fetch_sp500_baseline(conn, table=table, symbol_col=symbol_col, as_of_col=as_of_col)
+    return _fetch_sp500_baseline(
+        conn, table=table, symbol_col=symbol_col, as_of_col=as_of_col
+    )
 
 
 __all__ = ["DEFAULT_TABLE", "fetch_sp500_tickers"]
-

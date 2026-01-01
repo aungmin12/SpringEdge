@@ -11,22 +11,13 @@ This module intentionally stays light-weight:
   regime-aware and horizon-aware way.
 """
 
-import os
-import sys
-from dataclasses import dataclass
-from datetime import date, datetime
 import argparse
 import logging
 import re
-from typing import Any, Iterable, Literal, Sequence
-
-# Allow running this file directly (e.g. `python3 src/springedge/edge.py`).
-# Recommended invocation remains: `python3 -m springedge.edge`.
-if __name__ == "__main__" and (__package__ is None or __package__ == ""):
-    _pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if _pkg_root not in sys.path:
-        sys.path.insert(0, _pkg_root)
-    __package__ = "springedge"
+import sys
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Any, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -34,7 +25,12 @@ import pandas as pd
 from .db import db_connection
 from .logging_utils import configure_logging
 from .features import EdgeFeatureConfig, compute_edge_features
-from .layers import _as_iso_date, _validate_ident, _validate_table_ref, fetch_sp500_baseline
+from .layers import (
+    _as_iso_date,
+    _validate_ident,
+    _validate_table_ref,
+    fetch_sp500_baseline,
+)
 from .regime import fetch_market_regime_daily, summarize_market_regime
 
 
@@ -115,6 +111,7 @@ def fetch_ohlcv_daily(
     Returns a DataFrame with canonical column names:
       [symbol, date, open, high, low, close, volume]
     """
+
     def _safe_rollback() -> None:
         """
         Best-effort rollback for drivers that abort the current transaction on errors.
@@ -162,7 +159,10 @@ def fetch_ohlcv_daily(
         candidates = {tn}
         if "." in tn:
             candidates.add(tn.split(".")[-1])
-        return any((f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg) for c in candidates)
+        return any(
+            (f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg)
+            for c in candidates
+        )
 
     def _missing_column_error(err: Exception, *, column_name: str) -> bool:
         """
@@ -172,7 +172,9 @@ def fetch_ohlcv_daily(
         """
         msg = str(err).lower()
         cn = str(column_name).lower()
-        return (f'column "{cn}" does not exist' in msg) or (f"no such column: {cn}" in msg)
+        return (f'column "{cn}" does not exist' in msg) or (
+            f"no such column: {cn}" in msg
+        )
 
     t = _validate_table_ref(table, kind="table")
     symc = _validate_ident(symbol_col, kind="column")
@@ -185,7 +187,9 @@ def fetch_ohlcv_daily(
 
     syms = _validate_symbols(symbols)
     if not syms:
-        return pd.DataFrame(columns=["symbol", "date", "open", "high", "low", "close", "volume"])
+        return pd.DataFrame(
+            columns=["symbol", "date", "open", "high", "low", "close", "volume"]
+        )
 
     ph = _conn_placeholder(conn)
     in_list = ", ".join([ph] * len(syms))
@@ -216,6 +220,10 @@ def fetch_ohlcv_daily(
     try:
         return _fetch_df(sql, params)
     except Exception as exc:
+        # NOTE: exception variables are cleared at the end of an `except` block.
+        # Capture it to a normal local so nested helpers can safely reference it.
+        exc_value: Exception = exc
+
         # Compatibility: some schemas use different column names for ticker/date.
         # Common example: `ticker` instead of `symbol` in a `prices_daily` table.
         #
@@ -223,8 +231,8 @@ def fetch_ohlcv_daily(
         # (`symbol`/`date`). If the caller explicitly overrides, we assume they
         # know their schema and avoid endless retry loops.
         def _try_fetch_with_column_aliases() -> pd.DataFrame | None:
-            sym_missing = _missing_column_error(exc, column_name=symbol_col)
-            date_missing = _missing_column_error(exc, column_name=date_col)
+            sym_missing = _missing_column_error(exc_value, column_name=symbol_col)
+            date_missing = _missing_column_error(exc_value, column_name=date_col)
             if not (sym_missing or date_missing):
                 return None
 
@@ -272,9 +280,13 @@ def fetch_ohlcv_daily(
                     except Exception as exc2:
                         last_exc = exc2
                         # If we still have missing column errors, keep trying.
-                        if symc2 != symbol_col and _missing_column_error(exc2, column_name=symc2):
+                        if symc2 != symbol_col and _missing_column_error(
+                            exc2, column_name=symc2
+                        ):
                             continue
-                        if dc2 != date_col and _missing_column_error(exc2, column_name=dc2):
+                        if dc2 != date_col and _missing_column_error(
+                            exc2, column_name=dc2
+                        ):
                             continue
                         # For other errors (or mismatches), stop early.
                         break
@@ -295,7 +307,10 @@ def fetch_ohlcv_daily(
             # Only attempt this when the caller is filtering by ticker symbols.
             if symbol_col != "symbol":
                 return None
-            if not (_missing_column_error(exc, column_name=symbol_col) or _missing_column_error(exc, column_name=date_col)):
+            if not (
+                _missing_column_error(exc_value, column_name=symbol_col)
+                or _missing_column_error(exc_value, column_name=date_col)
+            ):
                 return None
 
             pt = _validate_table_ref(table, kind="table")
@@ -371,7 +386,9 @@ def fetch_ohlcv_daily(
 
         # Production schema compatibility: many DBs store daily prices in a schema,
         # e.g. `core.prices_daily`, while others expose it as `prices_daily` or `ohlcv_daily`.
-        if table == "core.prices_daily" and _missing_table_error(exc, table_name="core.prices_daily"):
+        if table == "core.prices_daily" and _missing_table_error(
+            exc, table_name="core.prices_daily"
+        ):
             for cand in ("prices_daily", "ohlcv_daily"):
                 try:
                     return fetch_ohlcv_daily(
@@ -399,7 +416,9 @@ def fetch_ohlcv_daily(
                     raise
         # Production schema compatibility: some DBs name this table `prices_daily`,
         # and some schema-qualify it under `core`.
-        if table == "ohlcv_daily" and _missing_table_error(exc, table_name="ohlcv_daily"):
+        if table == "ohlcv_daily" and _missing_table_error(
+            exc, table_name="ohlcv_daily"
+        ):
             for cand in ("prices_daily", "core.prices_daily"):
                 try:
                     return fetch_ohlcv_daily(
@@ -425,7 +444,9 @@ def fetch_ohlcv_daily(
                     if _missing_table_error(exc2, table_name=cand):
                         continue
                     raise
-        if table == "prices_daily" and _missing_table_error(exc, table_name="prices_daily"):
+        if table == "prices_daily" and _missing_table_error(
+            exc, table_name="prices_daily"
+        ):
             # If user explicitly set table=prices_daily, still try schema-qualified.
             return fetch_ohlcv_daily(
                 conn,
@@ -549,7 +570,9 @@ def default_edge_evaluation(
         IndicatorSpec("struct_growth_quality", +1.0),
         IndicatorSpec("struct_value_quality", +1.0),
         IndicatorSpec("ann_vol_20d", -1.0),
-        IndicatorSpec("drawdown", +1.0),  # drawdown is negative; "less negative" is better
+        IndicatorSpec(
+            "drawdown", +1.0
+        ),  # drawdown is negative; "less negative" is better
         IndicatorSpec("liquidity", +1.0),
     ]
 
@@ -652,7 +675,11 @@ def build_candidate_list(
 
     df = features.copy()
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df = df.dropna(subset=[symbol_col, date_col]).sort_values([symbol_col, date_col]).reset_index(drop=True)
+    df = (
+        df.dropna(subset=[symbol_col, date_col])
+        .sort_values([symbol_col, date_col])
+        .reset_index(drop=True)
+    )
 
     if as_of is not None:
         cutoff = pd.to_datetime(as_of, errors="raise")
@@ -746,13 +773,19 @@ def run_edge(
             else:
                 raise
         symbols = baseline[baseline_symbol_col].astype("string").dropna().tolist()
-        _LOG.info("run_edge: baseline rows=%d (table=%s)", len(baseline), baseline_table)
+        _LOG.info(
+            "run_edge: baseline rows=%d (table=%s)", len(baseline), baseline_table
+        )
         _LOG.info("run_edge: baseline symbols=%d", len(symbols))
         if _LOG.isEnabledFor(logging.DEBUG):
             _LOG.debug("run_edge: baseline symbol list=%s", symbols)
         else:
             preview = symbols[:_LOG_SYMBOLS_PREVIEW_LIMIT]
-            suffix = "" if len(symbols) <= _LOG_SYMBOLS_PREVIEW_LIMIT else f" ... (+{len(symbols) - len(preview)} more)"
+            suffix = (
+                ""
+                if len(symbols) <= _LOG_SYMBOLS_PREVIEW_LIMIT
+                else f" ... (+{len(symbols) - len(preview)} more)"
+            )
             _LOG.info("run_edge: baseline symbol preview=%s%s", preview, suffix)
         ohlcv = fetch_ohlcv_daily(
             c,
@@ -773,7 +806,11 @@ def run_edge(
             proxies=proxies,
             structural=structural,
         )
-        _LOG.info("run_edge: feature rows=%d cols=%d", len(feats), feats.shape[1] if not feats.empty else 0)
+        _LOG.info(
+            "run_edge: feature rows=%d cols=%d",
+            len(feats),
+            feats.shape[1] if not feats.empty else 0,
+        )
 
         # Pull the canonical market regime (if available) and join on date.
         # This makes `regime` in the candidates reflect the market regime table,
@@ -798,8 +835,12 @@ def run_edge(
                     )
                 if not mkt.empty and market_regime_date_col in mkt.columns:
                     m = mkt.copy()
-                    m[market_regime_date_col] = pd.to_datetime(m[market_regime_date_col], errors="coerce")
-                    m = m.dropna(subset=[market_regime_date_col]).sort_values(market_regime_date_col)
+                    m[market_regime_date_col] = pd.to_datetime(
+                        m[market_regime_date_col], errors="coerce"
+                    )
+                    m = m.dropna(subset=[market_regime_date_col]).sort_values(
+                        market_regime_date_col
+                    )
                     # Ensure exactly one row per day (if upstream accidentally has duplicates).
                     m = m.drop_duplicates(subset=[market_regime_date_col], keep="last")
 
@@ -818,10 +859,22 @@ def run_edge(
                             regime_col="regime_label",
                             score_col="regime_score",
                         )
-                        share = (summary.dominant_days / float(summary.total_days)) if summary.total_days else 0.0
-                        share20 = float(summary.recent_share_latest) if summary.recent_share_latest is not None else 0.0
+                        share = (
+                            (summary.dominant_days / float(summary.total_days))
+                            if summary.total_days
+                            else 0.0
+                        )
+                        share20 = (
+                            float(summary.recent_share_latest)
+                            if summary.recent_share_latest is not None
+                            else 0.0
+                        )
                         slope = summary.recent_score_slope
-                        slope_str = f"{float(slope):+.6f}" if slope is not None and np.isfinite(float(slope)) else "n/a"
+                        slope_str = (
+                            f"{float(slope):+.6f}"
+                            if slope is not None and np.isfinite(float(slope))
+                            else "n/a"
+                        )
 
                         # Multi-line, human-friendly summary for logs.
                         regime_summary_msg = (
@@ -854,15 +907,25 @@ def run_edge(
                     )
         except Exception as exc:
             # If the market regime table isn't present (or has schema differences), keep the derived regime.
-            _LOG.warning("run_edge: market regime join skipped (%s). Using derived regime.", exc)
+            _LOG.warning(
+                "run_edge: market regime join skipped (%s). Using derived regime.", exc
+            )
 
-        candidates = build_candidate_list(feats, symbol_col="symbol", date_col="date", as_of=candidates_as_of)
+        candidates = build_candidate_list(
+            feats, symbol_col="symbol", date_col="date", as_of=candidates_as_of
+        )
         if regime_summary_msg:
-            _LOG.info("run_edge: candidates=%d\n%s", len(candidates), regime_summary_msg)
+            _LOG.info(
+                "run_edge: candidates=%d\n%s", len(candidates), regime_summary_msg
+            )
         else:
             _LOG.info("run_edge: candidates=%d", len(candidates))
         scored = apply_indicators_to_candidates(candidates, evaluation=evaluation)
-        _LOG.info("run_edge: scored candidates=%d (edge_score present=%s)", len(scored), "edge_score" in scored.columns)
+        _LOG.info(
+            "run_edge: scored candidates=%d (edge_score present=%s)",
+            len(scored),
+            "edge_score" in scored.columns,
+        )
         return scored
 
     if conn is not None:
@@ -916,7 +979,9 @@ def _run_and_print_edge(
         try:
             from .score_performance import fetch_score_name_groups
 
-            score_groups = fetch_score_name_groups(conn, table=args.score_performance_table)
+            score_groups = fetch_score_name_groups(
+                conn, table=args.score_performance_table
+            )
         except Exception as exc:
             _LOG.warning("score_performance: skipped (%s)", exc)
 
@@ -926,7 +991,9 @@ def _run_and_print_edge(
         return 0
 
     # Keep the CLI output compact and stable.
-    with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 200):
+    with pd.option_context(
+        "display.max_rows", None, "display.max_columns", None, "display.width", 200
+    ):
         print(shown.to_string(index=False))
 
     # `fetch_score_name_groups()` returns a DataFrame, which cannot be used in a boolean
@@ -981,12 +1048,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     if "--score-performance" in argv_list:
         from .score_performance import main as _sp_main
+
         forwarded = [a for a in argv_list if a != "--score-performance"]
         return int(_sp_main(forwarded))
 
-    p = argparse.ArgumentParser(prog="springedge.edge", description="Run end-to-end Edge orchestration and print scored candidates.")
-    p.add_argument("--log-level", default="INFO", help="Logging level (e.g. DEBUG, INFO, WARNING). Default: INFO.")
-    p.add_argument("--demo", action="store_true", help="Run a self-contained sqlite demo (no external DB required).")
+    p = argparse.ArgumentParser(
+        prog="springedge.edge",
+        description="Run end-to-end Edge orchestration and print scored candidates.",
+    )
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        help="Logging level (e.g. DEBUG, INFO, WARNING). Default: INFO.",
+    )
+    p.add_argument(
+        "--demo",
+        action="store_true",
+        help="Run a self-contained sqlite demo (no external DB required).",
+    )
     p.add_argument(
         "--score-performance",
         action="store_true",
@@ -1014,21 +1093,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     # Baseline / layers
-    p.add_argument("--baseline-table", default="sp500", help="Baseline universe table. Default: sp500.")
-    p.add_argument("--baseline-symbol-col", default="symbol", help="Baseline symbol column. Default: symbol.")
+    p.add_argument(
+        "--baseline-table",
+        default="sp500",
+        help="Baseline universe table. Default: sp500.",
+    )
+    p.add_argument(
+        "--baseline-symbol-col",
+        default="symbol",
+        help="Baseline symbol column. Default: symbol.",
+    )
     p.add_argument(
         "--baseline-as-of-col",
         default="date",
         help="Baseline 'as of' date column (use ''/none to disable). Default: date.",
     )
-    p.add_argument("--baseline-as-of", default=None, help="Baseline as-of date filter (inclusive). Default: latest snapshot.")
+    p.add_argument(
+        "--baseline-as-of",
+        default=None,
+        help="Baseline as-of date filter (inclusive). Default: latest snapshot.",
+    )
 
     # OHLCV
-    p.add_argument("--ohlcv-table", default="core.prices_daily", help="OHLCV source table. Default: core.prices_daily.")
+    p.add_argument(
+        "--ohlcv-table",
+        default="core.prices_daily",
+        help="OHLCV source table. Default: core.prices_daily.",
+    )
     p.add_argument("--ohlcv-symbol-col", default="symbol")
     p.add_argument("--ohlcv-date-col", default="date")
-    p.add_argument("--ohlcv-start", default=None, help="OHLCV start date filter (inclusive).")
-    p.add_argument("--ohlcv-end", default=None, help="OHLCV end date filter (inclusive).")
+    p.add_argument(
+        "--ohlcv-start", default=None, help="OHLCV start date filter (inclusive)."
+    )
+    p.add_argument(
+        "--ohlcv-end", default=None, help="OHLCV end date filter (inclusive)."
+    )
 
     # Features / evaluation
     p.add_argument("--universe", default="sp500")
@@ -1038,8 +1137,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Horizon days (e.g. `--horizon-days 7 21` or `--horizon-days 7,21`).",
     )
-    p.add_argument("--horizon-basis", choices=("trading", "calendar"), default="trading")
-    p.add_argument("--candidates-as-of", default=None, help="Build one row per symbol as-of this date.")
+    p.add_argument(
+        "--horizon-basis", choices=("trading", "calendar"), default="trading"
+    )
+    p.add_argument(
+        "--candidates-as-of",
+        default=None,
+        help="Build one row per symbol as-of this date.",
+    )
     p.add_argument(
         "--top",
         type=int,
@@ -1163,7 +1268,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             horizon_days = (7, 21)
 
         try:
-            return _run_and_print_edge(conn, args=args, baseline_as_of_col=baseline_as_of_col, horizon_days=horizon_days)
+            return _run_and_print_edge(
+                conn,
+                args=args,
+                baseline_as_of_col=baseline_as_of_col,
+                horizon_days=horizon_days,
+            )
         finally:
             try:
                 conn.close()
@@ -1171,7 +1281,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pass
 
     with db_connection(args.db_url, env_var=args.db_env_var) as conn:
-        return _run_and_print_edge(conn, args=args, baseline_as_of_col=baseline_as_of_col, horizon_days=horizon_days)
+        return _run_and_print_edge(
+            conn,
+            args=args,
+            baseline_as_of_col=baseline_as_of_col,
+            horizon_days=horizon_days,
+        )
 
 
 if __name__ == "__main__":

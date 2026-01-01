@@ -7,7 +7,10 @@ from typing import Sequence
 import pandas as pd
 
 from springedge import db_connection
-from springedge.regime import fetch_market_regime_last_n_days, market_regime_counts_and_trend
+from springedge.regime import (
+    fetch_market_regime_last_n_days,
+    market_regime_counts_and_trend,
+)
 from springedge.logging_utils import configure_logging
 
 
@@ -17,13 +20,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Fetch last N days from market_regime_daily and summarize dominant regime + recent trend.",
     )
     p.add_argument("--log-level", default="INFO")
-    p.add_argument("--db-url", default=None, help="Database URL (overrides env var if provided).")
-    p.add_argument("--env-var", default="SPRINGEDGE_DB_URL", help="Env var containing DB URL. Default: SPRINGEDGE_DB_URL.")
+    p.add_argument(
+        "--db-url", default=None, help="Database URL (overrides env var if provided)."
+    )
+    p.add_argument(
+        "--env-var",
+        default="SPRINGEDGE_DB_URL",
+        help="Env var containing DB URL. Default: SPRINGEDGE_DB_URL.",
+    )
     p.add_argument("--table", default="market_regime_daily")
     p.add_argument("--analysis-date-col", default="analysis_date")
     p.add_argument("--lookback-days", type=int, default=90)
     p.add_argument("--trend-days", type=int, default=10)
-    p.add_argument("--as-of", default=None, help="As-of date (YYYY-MM-DD). Default: latest available analysis_date in table.")
+    p.add_argument(
+        "--as-of",
+        default=None,
+        help="As-of date (YYYY-MM-DD). Default: latest available analysis_date in table.",
+    )
     args = p.parse_args(list(argv) if argv is not None else None)
 
     level = getattr(logging, str(args.log_level).upper(), logging.INFO)
@@ -61,7 +74,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         .reset_index(drop=True)
     )
 
-    print("\nCounts by regime_label (last %d days, as-of %s):" % (args.lookback_days, summary.as_of))
+    print(
+        "\nCounts by regime_label (last %d days, as-of %s):"
+        % (args.lookback_days, summary.as_of)
+    )
     print(sql_counts.to_string(index=False))
 
     print("\nDominant market condition (last %d days):" % summary.lookback_days)
@@ -71,7 +87,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary.dominant_regime,
             summary.dominant_days,
             summary.total_days,
-            (summary.dominant_days / float(summary.total_days)) if summary.total_days else 0.0,
+            (summary.dominant_days / float(summary.total_days))
+            if summary.total_days
+            else 0.0,
         )
     )
 
@@ -82,14 +100,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary.latest_regime,
             summary.latest_streak_days,
             summary.recent_share_latest,
-            ("%.6f" % summary.recent_score_slope) if isinstance(summary.recent_score_slope, float) else "None",
+            ("%.6f" % summary.recent_score_slope)
+            if isinstance(summary.recent_score_slope, float)
+            else "None",
         )
     )
 
     # Optional: show last `trend_days` of labels (helps sanity-check “trend”).
     tail = df.copy()
-    tail[args.analysis_date_col] = pd.to_datetime(tail[args.analysis_date_col], errors="coerce")
-    tail = tail.dropna(subset=[args.analysis_date_col]).sort_values(args.analysis_date_col)
+    tail[args.analysis_date_col] = pd.to_datetime(
+        tail[args.analysis_date_col], errors="coerce"
+    )
+    tail = tail.dropna(subset=[args.analysis_date_col]).sort_values(
+        args.analysis_date_col
+    )
     recent = tail[[args.analysis_date_col, "regime_label"]].tail(int(args.trend_days))
     recent = recent.rename(columns={args.analysis_date_col: "analysis_date"})
     print("\nLast %d rows (date, regime_label):" % args.trend_days)
@@ -100,4 +124,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

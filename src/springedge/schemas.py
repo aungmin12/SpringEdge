@@ -94,4 +94,3 @@ __all__ = [
     "qualify_table",
     "iter_all_tables",
 ]
-

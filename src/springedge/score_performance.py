@@ -27,7 +27,9 @@ except ImportError:
     from springedge.layers import _validate_table_ref  # type: ignore
 
 # If a user runs this file directly, `__name__` becomes "__main__" which is noisy.
-_LOG = logging.getLogger("springedge.score_performance" if __name__ == "__main__" else __name__)
+_LOG = logging.getLogger(
+    "springedge.score_performance" if __name__ == "__main__" else __name__
+)
 
 ACTIONABLE_MIN_ABS_SPEARMAN_IC = 0.10
 ACTIONABLE_MIN_IC_IR = 1.5
@@ -59,7 +61,10 @@ def _missing_table_error(err: Exception, *, table_name: str) -> bool:
     candidates = {tn}
     if "." in tn:
         candidates.add(tn.split(".")[-1])
-    return any((f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg) for c in candidates)
+    return any(
+        (f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg)
+        for c in candidates
+    )
 
 
 def _load_table_as_df(conn: Any, *, table: str) -> pd.DataFrame:
@@ -120,7 +125,9 @@ def _normalize_spread_units(x: pd.Series, *, unit: str = "auto") -> pd.Series:
         if m > 1.5:
             return s / 100.0
         return s
-    raise ValueError(f"Unknown q5-q1 spread unit: {unit!r} (expected 'raw', 'percent_points', or 'auto').")
+    raise ValueError(
+        f"Unknown q5-q1 spread unit: {unit!r} (expected 'raw', 'percent_points', or 'auto')."
+    )
 
 
 def _normalize_q5_q1_threshold_to_decimals(x: float) -> float:
@@ -157,7 +164,11 @@ def _load_table_with_fallback(conn: Any, *, table: str) -> pd.DataFrame | None:
         if not _missing_table_error(exc, table_name=table):
             raise
 
-    fallback = "intelligence." + str(table) if "." not in str(table) else str(table).split(".")[-1]
+    fallback = (
+        "intelligence." + str(table)
+        if "." not in str(table)
+        else str(table).split(".")[-1]
+    )
     try:
         return _load_table_as_df(conn, table=fallback)
     except Exception as exc2:
@@ -295,7 +306,9 @@ def fetch_actionable_score_names(
     If `require_all_regimes=True`, a score is actionable only if it passes the criteria
     for every row (typically each regime_label) at the given horizon_days.
     """
-    min_abs_q5_minus_q1_dec = _normalize_q5_q1_threshold_to_decimals(min_abs_q5_minus_q1)
+    min_abs_q5_minus_q1_dec = _normalize_q5_q1_threshold_to_decimals(
+        min_abs_q5_minus_q1
+    )
 
     # If the caller provides explicit spread units, we can push the whole filter
     # into SQL for speed and simplicity (and avoid loading the entire table).
@@ -320,10 +333,16 @@ def fetch_actionable_score_names(
     cols = list(df.columns)
 
     score_col = _first_present(cols, ("score_name", "score", "name"))
-    horizon_col = _first_present(cols, ("horizon_days", "horizon", "horizon_day", "horizon_d"))
-    regime_col = _first_present(cols, ("regime_label", "regime", "market_regime", "regime_name"))
+    horizon_col = _first_present(
+        cols, ("horizon_days", "horizon", "horizon_day", "horizon_d")
+    )
+    regime_col = _first_present(
+        cols, ("regime_label", "regime", "market_regime", "regime_name")
+    )
 
-    ic_col = _first_present(cols, ("spearman_ic", "rank_ic", "ic_spearman", "spearman_rank_ic", "ic"))
+    ic_col = _first_present(
+        cols, ("spearman_ic", "rank_ic", "ic_spearman", "spearman_rank_ic", "ic")
+    )
     ir_col = _first_present(cols, ("ic_ir", "icir", "ir", "information_ratio"))
 
     # Prefer an explicit spread column.
@@ -354,11 +373,15 @@ def fetch_actionable_score_names(
     if spread_col is None and (q5_col is None or q1_col is None):
         missing.append("q5-q1 (spread column or q5 & q1 columns)")
     if missing:
-        raise ValueError(f"score_performance table missing required columns: {', '.join(missing)}")
+        raise ValueError(
+            f"score_performance table missing required columns: {', '.join(missing)}"
+        )
 
     work = df.copy()
     work[score_col] = work[score_col].astype("string")
-    work[horizon_col] = pd.to_numeric(work[horizon_col], errors="coerce").astype("Int64")
+    work[horizon_col] = pd.to_numeric(work[horizon_col], errors="coerce").astype(
+        "Int64"
+    )
     work = work.dropna(subset=[score_col, horizon_col]).copy()
     work = work[work[horizon_col] == int(horizon_days)].copy()
     if work.empty:
@@ -369,7 +392,9 @@ def fetch_actionable_score_names(
     if spread_col is not None:
         spread = _normalize_spread_units(work[spread_col], unit=q5_q1_unit)
     else:
-        spread = _normalize_spread_units(work[q5_col], unit=q5_q1_unit) - _normalize_spread_units(work[q1_col], unit=q5_q1_unit)
+        spread = _normalize_spread_units(
+            work[q5_col], unit=q5_q1_unit
+        ) - _normalize_spread_units(work[q1_col], unit=q5_q1_unit)
 
     passed = (
         (ic.abs() >= float(min_abs_spearman_ic))
@@ -460,27 +485,39 @@ def fetch_score_name_groups(
         except Exception as exc2:
             _safe_rollback()
             if _missing_table_error(exc2, table_name=fallback):
-                return pd.DataFrame(columns=["horizon_days", "regime_label", "n_scores", "score_names"])
+                return pd.DataFrame(
+                    columns=["horizon_days", "regime_label", "n_scores", "score_names"]
+                )
             raise
 
     if raw.empty:
-        return pd.DataFrame(columns=["horizon_days", "regime_label", "n_scores", "score_names"])
+        return pd.DataFrame(
+            columns=["horizon_days", "regime_label", "n_scores", "score_names"]
+        )
 
     raw["score_name"] = raw["score_name"].astype("string")
     raw["regime_label"] = raw["regime_label"].astype("string")
-    raw["horizon_days"] = pd.to_numeric(raw["horizon_days"], errors="coerce").astype("Int64")
+    raw["horizon_days"] = pd.to_numeric(raw["horizon_days"], errors="coerce").astype(
+        "Int64"
+    )
     raw = raw.dropna(subset=["score_name", "horizon_days", "regime_label"]).copy()
     if raw.empty:
-        return pd.DataFrame(columns=["horizon_days", "regime_label", "n_scores", "score_names"])
+        return pd.DataFrame(
+            columns=["horizon_days", "regime_label", "n_scores", "score_names"]
+        )
 
     grouped = (
-        raw.groupby(["horizon_days", "regime_label"], dropna=False, sort=True)["score_name"]
+        raw.groupby(["horizon_days", "regime_label"], dropna=False, sort=True)[
+            "score_name"
+        ]
         .apply(lambda s: sorted(set(s.dropna().astype(str).tolist())))
         .rename("score_names")
         .reset_index()
     )
     grouped["n_scores"] = grouped["score_names"].apply(len).astype("int64")
-    grouped = grouped[["horizon_days", "regime_label", "n_scores", "score_names"]].sort_values(
+    grouped = grouped[
+        ["horizon_days", "regime_label", "n_scores", "score_names"]
+    ].sort_values(
         ["horizon_days", "regime_label"],
         kind="mergesort",
     )
@@ -505,10 +542,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="springedge.score_performance",
         description="Fetch distinct score_name values grouped by horizon_days and regime_label.",
     )
-    p.add_argument("--log-level", default="INFO", help="Logging level (e.g. DEBUG, INFO). Default: INFO.")
-    p.add_argument("--demo", action="store_true", help="Run a self-contained sqlite demo (no external DB required).")
-    p.add_argument("--db-url", default=None, help="Database URL (overrides env var if provided).")
-    p.add_argument("--env-var", default="SPRINGEDGE_DB_URL", help="Env var containing DB URL. Default: SPRINGEDGE_DB_URL.")
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        help="Logging level (e.g. DEBUG, INFO). Default: INFO.",
+    )
+    p.add_argument(
+        "--demo",
+        action="store_true",
+        help="Run a self-contained sqlite demo (no external DB required).",
+    )
+    p.add_argument(
+        "--db-url", default=None, help="Database URL (overrides env var if provided)."
+    )
+    p.add_argument(
+        "--env-var",
+        default="SPRINGEDGE_DB_URL",
+        help="Env var containing DB URL. Default: SPRINGEDGE_DB_URL.",
+    )
     p.add_argument(
         "--table",
         default="intelligence.score_performance_evaluation",
@@ -522,7 +573,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Print only actionable score_name values (filters by |spearman_ic|, ic_ir, and |q5-q1| at a horizon).",
     )
-    p.add_argument("--horizon-days", type=int, default=365, help="Horizon (days) used for actionable filtering. Default: 365.")
+    p.add_argument(
+        "--horizon-days",
+        type=int,
+        default=365,
+        help="Horizon (days) used for actionable filtering. Default: 365.",
+    )
     # Intentionally hard-coded actionable thresholds to keep CLI simple.
     # If you need configurability, call `fetch_actionable_score_names(...)` directly.
     regime_group = p.add_mutually_exclusive_group()
@@ -611,7 +667,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 df = fetch_score_name_groups(conn, table=args.table)
 
     if args.actionable:
-        payload = df["score_name"].astype("string").dropna().astype(str).tolist() if "score_name" in df.columns else []
+        payload = (
+            df["score_name"].astype("string").dropna().astype(str).tolist()
+            if "score_name" in df.columns
+            else []
+        )
         print(json.dumps(payload, indent=2, sort_keys=False))
         _LOG.info("Done (actionable_scores=%d).", len(payload))
     else:
@@ -634,4 +694,3 @@ __all__ = ["fetch_actionable_score_names", "fetch_score_name_groups", "main"]
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

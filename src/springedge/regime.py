@@ -105,7 +105,10 @@ def fetch_market_regime_daily(
         candidates = {tn}
         if "." in tn:
             candidates.add(tn.split(".")[-1])
-        return any((f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg) for c in candidates)
+        return any(
+            (f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg)
+            for c in candidates
+        )
 
     def _run_query(*, _table: str) -> pd.DataFrame:
         t = _validate_table_ref(_table, kind="table")
@@ -199,7 +202,10 @@ def _fetch_max_date(
         candidates = {tn}
         if "." in tn:
             candidates.add(tn.split(".")[-1])
-        return any((f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg) for c in candidates)
+        return any(
+            (f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg)
+            for c in candidates
+        )
 
     def _run_query(*, _table: str) -> str | None:
         t = _validate_table_ref(_table, kind="table")
@@ -268,7 +274,9 @@ def fetch_market_regime_last_n_days(
         max_date = _fetch_max_date(conn, table=table, date_col=analysis_date_col)
         if max_date is None:
             # Fall back to fetching without filters; caller can decide how to handle empties.
-            return fetch_market_regime_daily(conn, table=table, analysis_date_col=analysis_date_col)
+            return fetch_market_regime_daily(
+                conn, table=table, analysis_date_col=analysis_date_col
+            )
         as_of = max_date
 
     end_dt = pd.to_datetime(as_of, errors="raise")
@@ -317,24 +325,41 @@ def summarize_market_regime(
     - counts: DataFrame with columns [regime, n_days, share]
     - summary: MarketRegimeSummary
     """
-    if date_col not in market_regime_daily.columns or regime_col not in market_regime_daily.columns:
-        raise ValueError(f"market_regime_daily must include columns {date_col!r} and {regime_col!r}")
+    if (
+        date_col not in market_regime_daily.columns
+        or regime_col not in market_regime_daily.columns
+    ):
+        raise ValueError(
+            f"market_regime_daily must include columns {date_col!r} and {regime_col!r}"
+        )
 
     df = market_regime_daily.copy()
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df = df.dropna(subset=[date_col, regime_col]).sort_values(date_col).reset_index(drop=True)
+    df = (
+        df.dropna(subset=[date_col, regime_col])
+        .sort_values(date_col)
+        .reset_index(drop=True)
+    )
     df[regime_col] = df[regime_col].astype("string")
     if score_col in df.columns:
         df[score_col] = pd.to_numeric(df[score_col], errors="coerce").astype("float64")
 
     if df.empty:
-        raise ValueError("market_regime_daily is empty after coercion; cannot compute summary")
+        raise ValueError(
+            "market_regime_daily is empty after coercion; cannot compute summary"
+        )
 
-    as_of_ts = pd.to_datetime(as_of, errors="raise") if as_of is not None else df[date_col].max()
+    as_of_ts = (
+        pd.to_datetime(as_of, errors="raise")
+        if as_of is not None
+        else df[date_col].max()
+    )
     start_ts = as_of_ts - timedelta(days=int(lookback_days))
     w = df[(df[date_col] >= start_ts) & (df[date_col] <= as_of_ts)].copy()
     if w.empty:
-        raise ValueError("No market_regime_daily rows found in the requested lookback window")
+        raise ValueError(
+            "No market_regime_daily rows found in the requested lookback window"
+        )
 
     counts = (
         w.groupby(regime_col, dropna=True)
@@ -366,7 +391,11 @@ def summarize_market_regime(
 
     recent = rev.head(int(trend_lookback_days)).copy()
     recent_n = int(len(recent))
-    recent_share_latest = float((recent[regime_col].astype("string") == latest_regime).mean()) if recent_n else 0.0
+    recent_share_latest = (
+        float((recent[regime_col].astype("string") == latest_regime).mean())
+        if recent_n
+        else 0.0
+    )
 
     # Score slope over recent window (simple least squares on index).
     recent_score_slope: float | None = None
@@ -381,7 +410,9 @@ def summarize_market_regime(
             # slope = cov(x,y)/var(x)
             denom = float(((x - x.mean()) ** 2).sum())
             if denom != 0.0:
-                recent_score_slope = float(((x - x.mean()) * (y - y.mean())).sum() / denom)
+                recent_score_slope = float(
+                    ((x - x.mean()) * (y - y.mean())).sum() / denom
+                )
 
     summary = MarketRegimeSummary(
         as_of=pd.to_datetime(as_of_ts).date().isoformat(),
@@ -454,7 +485,9 @@ def quarterly_regime_profile(
     - dominant: a small summary object for the selected (default: most recent) quarter
     """
     if date_col not in regime_daily.columns or regime_col not in regime_daily.columns:
-        raise ValueError(f"regime_daily must include columns {date_col!r} and {regime_col!r}")
+        raise ValueError(
+            f"regime_daily must include columns {date_col!r} and {regime_col!r}"
+        )
 
     df = regime_daily[[date_col, regime_col]].copy()
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
@@ -463,7 +496,9 @@ def quarterly_regime_profile(
     df = df.sort_values(date_col).reset_index(drop=True)
 
     if df.empty:
-        raise ValueError("regime_daily is empty after coercion; cannot compute quarterly profile")
+        raise ValueError(
+            "regime_daily is empty after coercion; cannot compute quarterly profile"
+        )
 
     qser = df[date_col].dt.to_period("Q")
     df["_quarter"] = qser
@@ -510,4 +545,3 @@ def quarterly_regime_profile(
             total_days=total_days,
         ),
     )
-
