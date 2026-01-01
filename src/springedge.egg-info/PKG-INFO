@@ -1,3 +1,14 @@
+Metadata-Version: 2.4
+Name: springedge
+Version: 0.1.0
+Summary: Edge system feature generation (regime/structural/tactical/risk + forward returns).
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=2.0.0
+Requires-Dist: pandas>=2.2.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+
 # SpringEdge
 
 Minimal "Edge system" feature generation.
