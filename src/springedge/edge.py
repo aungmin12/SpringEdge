@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
 """
@@ -58,6 +59,67 @@ _SYMBOL_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 # becomes "__main__", which looks bad in logs. Use a stable logger name instead.
 _LOG = logging.getLogger("springedge.edge" if __name__ == "__main__" else __name__)
 _LOG_SYMBOLS_PREVIEW_LIMIT = 50
+
+
+@dataclass(frozen=True)
+class SignalLayerPolicyRow:
+    signal_name: str
+    horizon_days: int
+    layer_name: str  # quality_365 | confirm_30 | micro_7 | ...
+    weight: float
+    min_regime: str = "ANY"  # CAUTION | POSITIVE | ANY
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class HorizonThresholds:
+    spearman_ic: float
+    ic_ir: float
+    q5_minus_q1: float
+    n_obs: int
+    # Optional extras
+    reject_if_ic_ir_below: float | None = None
+    reject_if_sign_flip_across_regimes: bool = False
+    strong_ic_ir: float | None = None
+    strong_q5_minus_q1: float | None = None
+
+
+_HORIZON_THRESHOLDS: dict[int, HorizonThresholds] = {
+    # STEP 1 (non-negotiable): exact thresholds per horizon
+    # 7D micro / timing
+    7: HorizonThresholds(
+        spearman_ic=0.03,
+        ic_ir=0.8,
+        q5_minus_q1=0.3,
+        n_obs=500,
+        reject_if_ic_ir_below=0.5,
+        reject_if_sign_flip_across_regimes=True,
+    ),
+    # 21–30D confirmation / tactical (use the same thresholds for both 21 and 30)
+    21: HorizonThresholds(
+        spearman_ic=0.05,
+        ic_ir=1.2,
+        q5_minus_q1=0.7,
+        n_obs=1_000,
+        strong_ic_ir=1.8,
+        strong_q5_minus_q1=1.2,
+    ),
+    30: HorizonThresholds(
+        spearman_ic=0.05,
+        ic_ir=1.2,
+        q5_minus_q1=0.7,
+        n_obs=1_000,
+        strong_ic_ir=1.8,
+        strong_q5_minus_q1=1.2,
+    ),
+    # 90–180D structural
+    90: HorizonThresholds(spearman_ic=0.08, ic_ir=1.5, q5_minus_q1=1.0, n_obs=2_000),
+    180: HorizonThresholds(
+        spearman_ic=0.08, ic_ir=1.5, q5_minus_q1=1.0, n_obs=2_000
+    ),
+    # 365D quality / ownership
+    365: HorizonThresholds(spearman_ic=0.10, ic_ir=2.0, q5_minus_q1=2.0, n_obs=2_000),
+}
 
 
 def _safe_float(x: object) -> float | None:
@@ -312,18 +374,6 @@ def persist_topdown_evaluation(
     res_t = _validate_table_ref(result_table, kind="table")
     ph = _conn_placeholder(conn)
 
-    # Minimal stable result fields (topdown-only).
-    required = [
-        "symbol",
-        "date",
-        "edge_score_topdown",
-        "topdown_gate",
-        "layer_z_quality_365",
-        "layer_z_structural_63_126",
-        "layer_z_confirm_30",
-        "layer_z_trigger_21",
-        "layer_z_micro_7",
-    ]
     missing = [c for c in ("symbol", "date") if c not in scored_candidates.columns]
     if missing:
         raise ValueError(f"scored_candidates missing required columns: {missing}")
@@ -871,6 +921,722 @@ def _missing_table_error(err: Exception, *, table_name: str) -> bool:
     msg = str(err).lower()
     tn = str(table_name).lower()
     return (f'relation "{tn}" does not exist' in msg) or (f"no such table: {tn}" in msg)
+
+
+def ensure_signal_layer_policy_table(
+    conn: Any,
+    *,
+    table: str = "intelligence.signal_layer_policy",
+) -> str:
+    """
+    STEP 3: create the missing backbone table (portable DB-API DDL).
+
+    Returns the table reference actually created/used (may differ on sqlite if the
+    requested schema isn't attached).
+    """
+    requested = str(table)
+    # Validate identifiers (schema-qualified allowed).
+    try:
+        t = _validate_table_ref(requested, kind="table")
+    except Exception:
+        # If callers pass something odd, fall back to a safe default.
+        t = "signal_layer_policy"
+
+    cur = conn.cursor()
+    try:
+        if _is_sqlite_conn(conn):
+            # sqlite supports schema-qualified names only when the schema is ATTACHed.
+            # If it isn't, fallback to an unqualified table name.
+            try:
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {t} (
+                      signal_name TEXT,
+                      horizon_days INT,
+                      layer_name TEXT,
+                      weight FLOAT,
+                      min_regime TEXT DEFAULT 'ANY',
+                      enabled BOOLEAN DEFAULT TRUE,
+                      PRIMARY KEY (signal_name, horizon_days, layer_name)
+                    )
+                    """
+                )
+                out_table = t
+            except Exception as exc:
+                # "unknown database intelligence" / similar
+                fallback = "signal_layer_policy"
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {fallback} (
+                      signal_name TEXT,
+                      horizon_days INT,
+                      layer_name TEXT,
+                      weight FLOAT,
+                      min_regime TEXT DEFAULT 'ANY',
+                      enabled BOOLEAN DEFAULT TRUE,
+                      PRIMARY KEY (signal_name, horizon_days, layer_name)
+                    )
+                    """
+                )
+                _LOG.info(
+                    "signal_layer_policy: sqlite schema not attached; using table=%s (requested=%s, err=%s)",
+                    fallback,
+                    requested,
+                    exc,
+                )
+                out_table = fallback
+        else:
+            # Postgres-ish: ensure schema exists if schema-qualified.
+            if "." in t:
+                schema = t.split(".")[0]
+                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {t} (
+                  signal_name TEXT,
+                  horizon_days INT,
+                  layer_name TEXT,
+                  weight DOUBLE PRECISION,
+                  min_regime TEXT DEFAULT 'ANY',
+                  enabled BOOLEAN DEFAULT TRUE,
+                  PRIMARY KEY (signal_name, horizon_days, layer_name)
+                )
+                """
+            )
+            out_table = t
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    try:
+        if hasattr(conn, "commit"):
+            conn.commit()
+    except Exception:
+        pass
+    return str(out_table)
+
+
+def default_sp500_signal_layer_policy_rows() -> list[SignalLayerPolicyRow]:
+    """
+    STEP 2 + STEP 3: production-grade whitelist expressed as policy rows.
+    """
+    rows: list[SignalLayerPolicyRow] = []
+
+    # 🟣 Quality Layer (365D)
+    for s in [
+        "nonuple.growth",
+        "nonuple.competitive",
+        "nonuple.financial",
+        "nonuple.profitability",
+        "fin.revenue_growth",
+        "fin.roe",
+    ]:
+        rows.append(
+            SignalLayerPolicyRow(
+                signal_name=s,
+                horizon_days=365,
+                layer_name="quality_365",
+                weight=1.0,
+                min_regime="ANY",
+                enabled=True,
+            )
+        )
+
+    # 🟡 Confirmation Layer (21–30D) — use 30 as the canonical horizon label.
+    rows.extend(
+        [
+            SignalLayerPolicyRow(
+                "trs_combined.tqi_current", 30, "confirm_30", 1.2, "ANY", True
+            ),
+            SignalLayerPolicyRow("trs_combined.total", 30, "confirm_30", 1.0, "ANY", True),
+            SignalLayerPolicyRow("mqps.tape_quality", 30, "confirm_30", 1.0, "ANY", True),
+            SignalLayerPolicyRow(
+                "mqps.days_since_earnings", 30, "confirm_30", 1.0, "ANY", True
+            ),
+            SignalLayerPolicyRow(
+                "options_flow.institutional_flow", 30, "confirm_30", 1.0, "ANY", True
+            ),
+            # Only include in CAUTION regimes (per user example).
+            SignalLayerPolicyRow(
+                "options_flow.unusual_activity", 30, "confirm_30", 0.8, "CAUTION", True
+            ),
+        ]
+    )
+
+    # 🟢 Micro Layer (7D)
+    for s in [
+        "options_flow.momentum",
+        "options_flow.large_block_activity",
+        "tech.volume_confirmation_score",
+        "trs_combined.volume_ratio_20d",
+    ]:
+        rows.append(
+            SignalLayerPolicyRow(
+                signal_name=s,
+                horizon_days=7,
+                layer_name="micro_7",
+                weight=0.5,
+                min_regime="ANY",
+                enabled=True,
+            )
+        )
+
+    return rows
+
+
+def upsert_signal_layer_policy(
+    conn: Any,
+    rows: Sequence[SignalLayerPolicyRow],
+    *,
+    table: str = "intelligence.signal_layer_policy",
+) -> str:
+    """
+    Insert/update rows into `signal_layer_policy`.
+
+    Returns the table reference actually used (sqlite may fallback to unqualified).
+    """
+    t = ensure_signal_layer_policy_table(conn, table=table)
+    ph = _conn_placeholder(conn)
+
+    cols = "signal_name, horizon_days, layer_name, weight, min_regime, enabled"
+    if _is_sqlite_conn(conn):
+        sql = f"INSERT OR REPLACE INTO {t} ({cols}) VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph})"
+    else:
+        sql = f"""
+        INSERT INTO {t} ({cols})
+        VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+        ON CONFLICT (signal_name, horizon_days, layer_name)
+        DO UPDATE SET
+          weight = EXCLUDED.weight,
+          min_regime = EXCLUDED.min_regime,
+          enabled = EXCLUDED.enabled
+        """
+
+    data: list[tuple[Any, ...]] = []
+    for r in rows:
+        data.append(
+            (
+                str(r.signal_name),
+                int(r.horizon_days),
+                str(r.layer_name),
+                float(r.weight),
+                str(r.min_regime),
+                bool(r.enabled),
+            )
+        )
+
+    cur = conn.cursor()
+    try:
+        cur.executemany(sql, data)
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    try:
+        if hasattr(conn, "commit"):
+            conn.commit()
+    except Exception:
+        pass
+    return str(t)
+
+
+def _load_score_performance_df(
+    conn: Any,
+    *,
+    table: str = "score_performance_evaluation",
+) -> pd.DataFrame:
+    """
+    Best-effort loader for score performance stats, with common schema fallback.
+    """
+    def _fetch(_table: str) -> pd.DataFrame:
+        t = _validate_table_ref(_table, kind="table")
+        cur = conn.cursor()
+        try:
+            try:
+                cur.execute(f"SELECT * FROM {t}")
+            except Exception:
+                try:
+                    if hasattr(conn, "rollback"):
+                        conn.rollback()
+                except Exception:
+                    pass
+                raise
+            rows = cur.fetchall()
+            cols = [d[0] for d in (cur.description or [])]
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        return pd.DataFrame.from_records(rows, columns=cols)
+
+    try:
+        return _fetch(table)
+    except Exception as exc:
+        if not _missing_table_error(exc, table_name=table):
+            raise
+        fallback = (
+            f"intelligence.{table}" if "." not in str(table) else str(table).split(".")[-1]
+        )
+        try:
+            return _fetch(fallback)
+        except Exception as exc2:
+            if _missing_table_error(exc2, table_name=fallback):
+                return pd.DataFrame()
+            raise
+
+
+def evaluate_actionable_signals_by_horizon(
+    conn: Any,
+    *,
+    horizon_days: int,
+    table: str = "score_performance_evaluation",
+) -> pd.DataFrame:
+    """
+    STEP 1: apply the exact horizon thresholds (non-negotiable).
+
+    Returns a DataFrame with one row per score_name:
+      [score_name, horizon_days, passed, strong, reason]
+    """
+    th = _HORIZON_THRESHOLDS.get(int(horizon_days))
+    if th is None:
+        raise ValueError(f"Unsupported horizon_days={horizon_days}; no thresholds defined.")
+
+    df = _load_score_performance_df(conn, table=table)
+    if df.empty:
+        return pd.DataFrame(
+            columns=["score_name", "horizon_days", "passed", "strong", "reason"]
+        )
+
+    df.columns = [str(c) for c in df.columns]
+    cols = list(df.columns)
+
+    def _first_present(candidates: Sequence[str]) -> str | None:
+        s = set(cols)
+        for cand in candidates:
+            if cand in s:
+                return cand
+        return None
+
+    score_col = _first_present(("score_name", "score", "name"))
+    horizon_col = _first_present(("horizon_days", "horizon", "horizon_day", "horizon_d"))
+    regime_col = _first_present(("regime_label", "regime", "market_regime", "regime_name"))
+    ic_col = _first_present(("spearman_ic", "rank_ic", "ic_spearman", "spearman_rank_ic", "ic"))
+    ir_col = _first_present(("ic_ir", "icir", "ir", "information_ratio"))
+    spread_col = _first_present(("q5_minus_q1", "q5_q1", "q5_q1_spread", "q5q1"))
+    nobs_col = _first_present(("n_obs", "sample_size", "n", "n_samples", "count"))
+
+    missing: list[str] = []
+    if score_col is None:
+        missing.append("score_name")
+    if horizon_col is None:
+        missing.append("horizon_days")
+    if ic_col is None:
+        missing.append("spearman_ic")
+    if ir_col is None:
+        missing.append("ic_ir")
+    if spread_col is None:
+        missing.append("q5_minus_q1")
+    if nobs_col is None:
+        missing.append("n_obs")
+    if missing:
+        raise ValueError(f"score_performance table missing required columns: {missing}")
+
+    w = df.copy()
+    w[score_col] = w[score_col].astype("string")
+    w[horizon_col] = pd.to_numeric(w[horizon_col], errors="coerce").astype("Int64")
+    w = w.dropna(subset=[score_col, horizon_col]).copy()
+    w = w[w[horizon_col] == int(horizon_days)].copy()
+    if w.empty:
+        return pd.DataFrame(
+            columns=["score_name", "horizon_days", "passed", "strong", "reason"]
+        )
+
+    ic = pd.to_numeric(w[ic_col], errors="coerce").astype("float64")
+    ir = pd.to_numeric(w[ir_col], errors="coerce").astype("float64")
+    sp = pd.to_numeric(w[spread_col], errors="coerce").astype("float64")
+    nobs = pd.to_numeric(w[nobs_col], errors="coerce").astype("float64")
+
+    # Per-row pass (treat as "per regime row" when a regime column exists).
+    row_pass = (
+        (ic >= float(th.spearman_ic))
+        & (ir >= float(th.ic_ir))
+        & (sp >= float(th.q5_minus_q1))
+        & (nobs >= float(th.n_obs))
+    )
+
+    # Optional explicit reject rules.
+    if th.reject_if_ic_ir_below is not None:
+        row_pass = row_pass & (ir >= float(th.reject_if_ic_ir_below))
+
+    w["_row_pass"] = row_pass.fillna(False)
+
+    # Sign flip across regimes (reject). If no regime column, treat as stable.
+    if bool(th.reject_if_sign_flip_across_regimes) and regime_col is not None:
+        signs = np.sign(ic.fillna(0.0))
+        w["_ic_sign"] = signs
+        gb_sign = w.groupby(score_col, dropna=False, sort=True)["_ic_sign"]
+        # sign flip if there exist both positive and negative rows
+        has_pos = gb_sign.apply(lambda s: bool((s > 0).any()))
+        has_neg = gb_sign.apply(lambda s: bool((s < 0).any()))
+        flip = (has_pos & has_neg).rename("_sign_flip").reset_index()
+        w = w.merge(flip, on=score_col, how="left")
+        w["_sign_flip"] = w["_sign_flip"].fillna(False)
+        w["_row_pass"] = w["_row_pass"] & (~w["_sign_flip"])
+    else:
+        w["_sign_flip"] = False
+
+    # Aggregate to score_name: require all rows (regimes) to pass.
+    gb = w.groupby(score_col, dropna=False, sort=True)
+    passed = gb["_row_pass"].all()
+
+    # Strong flag (only relevant where thresholds define it).
+    strong = pd.Series([False] * len(passed), index=passed.index, dtype="bool")
+    if th.strong_ic_ir is not None and th.strong_q5_minus_q1 is not None:
+        row_strong = (ir >= float(th.strong_ic_ir)) & (sp >= float(th.strong_q5_minus_q1))
+        w["_row_strong"] = row_strong.fillna(False)
+        strong = gb["_row_strong"].all()
+
+    # Reason summary (compact; first failing reason).
+    reasons: list[dict[str, Any]] = []
+    for name in passed.index.astype(str).tolist():
+        ok = bool(passed.loc[name])
+        if ok:
+            reason = ""
+        else:
+            # Find any failing row for this score.
+            ww = w[w[score_col].astype(str) == str(name)]
+            flip_any = bool(ww["_sign_flip"].fillna(False).any())
+            if flip_any:
+                reason = "IC flips sign across regimes"
+            else:
+                reason = "fails threshold(s)"
+        reasons.append(
+            {
+                "score_name": str(name),
+                "horizon_days": int(horizon_days),
+                "passed": ok,
+                "strong": bool(strong.loc[name]) if name in strong.index else False,
+                "reason": reason,
+            }
+        )
+
+    return pd.DataFrame.from_records(reasons)
+
+
+def _market_tag_from_regime_row(regime_label: str | None, regime_score: float | None) -> str:
+    """
+    Map the current market regime to a simple policy tag: POSITIVE | CAUTION.
+    """
+    lbl = (str(regime_label or "")).lower()
+    if regime_score is not None:
+        try:
+            if float(regime_score) < 0.0:
+                return "CAUTION"
+        except Exception:
+            pass
+    if "risk_off" in lbl:
+        return "CAUTION"
+    return "POSITIVE"
+
+
+def _fetch_policy_rows(
+    conn: Any,
+    *,
+    table: str = "intelligence.signal_layer_policy",
+    only_enabled: bool = True,
+) -> tuple[str, list[SignalLayerPolicyRow]]:
+    t = ensure_signal_layer_policy_table(conn, table=table)
+    cur = conn.cursor()
+    try:
+        if only_enabled:
+            if _is_sqlite_conn(conn):
+                sql = f"""
+                SELECT signal_name, horizon_days, layer_name, weight, min_regime, enabled
+                FROM {t}
+                WHERE enabled = 1
+                """
+                cur.execute(sql)
+            else:
+                sql = f"""
+                SELECT signal_name, horizon_days, layer_name, weight, min_regime, enabled
+                FROM {t}
+                WHERE enabled = TRUE
+                """
+                cur.execute(sql)
+        else:
+            cur.execute(
+                f"SELECT signal_name, horizon_days, layer_name, weight, min_regime, enabled FROM {t}"
+            )
+        rows = cur.fetchall()
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    out: list[SignalLayerPolicyRow] = []
+    for r in rows:
+        if not r:
+            continue
+        out.append(
+            SignalLayerPolicyRow(
+                signal_name=str(r[0]),
+                horizon_days=int(r[1]),
+                layer_name=str(r[2]),
+                weight=float(r[3]) if r[3] is not None else 0.0,
+                min_regime=str(r[4] or "ANY"),
+                enabled=bool(r[5]),
+            )
+        )
+    return str(t), out
+
+
+def score_sp500_from_signal_layer_policy(
+    conn: Any,
+    *,
+    baseline_table: str = "sp500",
+    baseline_symbol_col: str = "symbol",
+    baseline_as_of_col: str | None = "date",
+    baseline_as_of: str | date | datetime | None = None,
+    as_of: str | date | datetime | None = None,
+    policy_table: str = "intelligence.signal_layer_policy",
+    score_performance_table: str = "score_performance_evaluation",
+    quality_threshold: float = 0.0,
+    confirm_threshold: float = 0.0,
+    market_regime_table: str = "market_regime_daily",
+    market_regime_date_col: str = "analysis_date",
+) -> pd.DataFrame:
+    """
+    STEP 4: connect policy-driven layers to live per-stock scoring.
+
+    Output columns (core):
+    - symbol, date
+    - market_regime_label, market_regime_score, market_policy_tag
+    - layer_z_quality_365, layer_z_confirm_30, layer_z_micro_7
+    - trade_state (DO_NOT_TRADE | WAIT | TRADE)
+    - edge_score (ranking score; micro never overrides higher layers)
+    """
+    # Universe
+    baseline = fetch_sp500_baseline(
+        conn,
+        table=baseline_table,
+        symbol_col=baseline_symbol_col,
+        as_of_col=baseline_as_of_col,
+        as_of=baseline_as_of,
+    )
+    symbols = baseline[baseline_symbol_col].astype("string").dropna().tolist()
+    if not symbols:
+        return pd.DataFrame(
+            columns=[
+                "symbol",
+                "date",
+                "market_regime_label",
+                "market_regime_score",
+                "market_policy_tag",
+                "layer_z_quality_365",
+                "layer_z_confirm_30",
+                "layer_z_micro_7",
+                "trade_state",
+                "edge_score",
+            ]
+        )
+
+    # Use as_of (defaults to baseline_as_of when not provided).
+    as_of_effective = as_of if as_of is not None else baseline_as_of
+
+    # Market regime tag (POSITIVE/CAUTION) used for policy min_regime gating.
+    regime_label: str | None = None
+    regime_score: float | None = None
+    try:
+        mkt = fetch_market_regime_daily(
+            conn,
+            table=market_regime_table,
+            analysis_date_col=market_regime_date_col,
+            end=as_of_effective,
+        )
+        if not mkt.empty and market_regime_date_col in mkt.columns:
+            m = mkt.copy()
+            m[market_regime_date_col] = pd.to_datetime(
+                m[market_regime_date_col], errors="coerce"
+            )
+            m = m.dropna(subset=[market_regime_date_col]).sort_values(
+                market_regime_date_col
+            )
+            if not m.empty:
+                last = m.iloc[-1]
+                regime_label = str(last.get("regime_label")) if "regime_label" in m.columns else None
+                try:
+                    regime_score = (
+                        float(last.get("regime_score"))
+                        if "regime_score" in m.columns and last.get("regime_score") is not None
+                        else None
+                    )
+                except Exception:
+                    regime_score = None
+    except Exception:
+        pass
+    market_tag = _market_tag_from_regime_row(regime_label, regime_score)
+
+    # Policy rows
+    _, policy_rows = _fetch_policy_rows(conn, table=policy_table, only_enabled=True)
+    if not policy_rows:
+        return pd.DataFrame(
+            {
+                "symbol": pd.Series(symbols, dtype="string"),
+                "date": pd.Series([_as_iso_date(as_of_effective) if as_of_effective is not None else None] * len(symbols), dtype="string"),
+                "market_regime_label": regime_label,
+                "market_regime_score": regime_score,
+                "market_policy_tag": market_tag,
+                "layer_z_quality_365": 0.0,
+                "layer_z_confirm_30": 0.0,
+                "layer_z_micro_7": 0.0,
+                "trade_state": "WAIT",
+                "edge_score": 0.0,
+            }
+        )
+
+    # Apply min_regime gating at the signal row level.
+    active_policy: list[SignalLayerPolicyRow] = []
+    for r in policy_rows:
+        mr = str(r.min_regime or "ANY").upper()
+        if mr == "ANY":
+            active_policy.append(r)
+        elif mr == str(market_tag).upper():
+            active_policy.append(r)
+    policy_rows = active_policy
+
+    # Signal sources (wide tables in intelligence schema).
+    from .selection import ScoreValueSource, fetch_latest_score_values_with_aliases
+
+    sources = [
+        ScoreValueSource("intelligence.nonuple_analysis", "symbol", "analysis_date"),
+        ScoreValueSource("intelligence.nonuple_financial_metrics", "symbol", "analysis_date"),
+        ScoreValueSource("intelligence.nonuple_technical_indicators", "symbol", "analysis_date"),
+        ScoreValueSource("intelligence.mid_quarter_performance_scores", "symbol", "score_date"),
+        ScoreValueSource("intelligence.options_flow_intelligence", "symbol", "analysis_date"),
+        ScoreValueSource("intelligence.options_flow_summary", "symbol", "analysis_date"),
+        ScoreValueSource("intelligence.trade_readiness_scores", "symbol", "score_date"),
+        ScoreValueSource("intelligence.trade_phase_tracking", "symbol", "calculation_date"),
+        ScoreValueSource("intelligence.ownership_intelligence", "symbol", "as_of"),
+    ]
+
+    score_names = sorted(set([r.signal_name for r in policy_rows]))
+    sources2 = [
+        ScoreValueSource(s.table.split(".")[-1], s.symbol_col, s.date_col) for s in sources
+    ]
+    try:
+        raw = fetch_latest_score_values_with_aliases(
+            conn, scores=score_names, sources=sources, as_of=as_of_effective
+        )
+    except Exception:
+        raw = fetch_latest_score_values_with_aliases(
+            conn, scores=score_names, sources=sources2, as_of=as_of_effective
+        )
+    # If schema-qualified tables are missing, discovery may return an empty frame.
+    if raw.empty:
+        raw = fetch_latest_score_values_with_aliases(
+            conn, scores=score_names, sources=sources2, as_of=as_of_effective
+        )
+    if raw.empty:
+        # No values available; return a safe empty-ish frame.
+        out = pd.DataFrame({"symbol": pd.Series(symbols, dtype="string")})
+        out["date"] = _as_iso_date(as_of_effective) if as_of_effective is not None else None
+        out["market_regime_label"] = regime_label
+        out["market_regime_score"] = regime_score
+        out["market_policy_tag"] = market_tag
+        out["layer_z_quality_365"] = 0.0
+        out["layer_z_confirm_30"] = 0.0
+        out["layer_z_micro_7"] = 0.0
+        out["trade_state"] = "WAIT"
+        out["edge_score"] = 0.0
+        return out
+
+    # Restrict to baseline symbols (SP500) explicitly.
+    raw["symbol"] = raw["symbol"].astype("string")
+    raw = raw[raw["symbol"].astype(str).isin(set(map(str, symbols)))].copy()
+    if raw.empty:
+        return pd.DataFrame(
+            columns=[
+                "symbol",
+                "date",
+                "market_regime_label",
+                "market_regime_score",
+                "market_policy_tag",
+                "layer_z_quality_365",
+                "layer_z_confirm_30",
+                "layer_z_micro_7",
+                "trade_state",
+                "edge_score",
+            ]
+        )
+
+    # Cross-sectional z-score per signal.
+    zcols: dict[str, pd.Series] = {}
+    for s in score_names:
+        if s not in raw.columns:
+            continue
+        zcols[s] = _zscore(pd.to_numeric(raw[s], errors="coerce").astype("float64")).fillna(0.0)
+
+    # Layer aggregation (Σ z_signal * weight).
+    out = raw[["symbol", "date"]].copy()
+    out["market_regime_label"] = regime_label
+    out["market_regime_score"] = regime_score
+    out["market_policy_tag"] = market_tag
+
+    def _layer_sum(layer_name: str, horizon: int) -> pd.Series:
+        xs = [r for r in policy_rows if r.layer_name == layer_name and int(r.horizon_days) == int(horizon)]
+        if not xs:
+            return pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+        acc = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+        for r in xs:
+            z = zcols.get(r.signal_name)
+            if z is None:
+                continue
+            acc = acc + float(r.weight) * pd.to_numeric(z, errors="coerce").fillna(0.0)
+        return acc.astype("float64")
+
+    out["layer_z_quality_365"] = _layer_sum("quality_365", 365)
+    out["layer_z_confirm_30"] = _layer_sum("confirm_30", 30)
+    out["layer_z_micro_7"] = _layer_sum("micro_7", 7)
+
+    # Hard hierarchy gates.
+    q = pd.to_numeric(out["layer_z_quality_365"], errors="coerce").fillna(0.0)
+    c = pd.to_numeric(out["layer_z_confirm_30"], errors="coerce").fillna(0.0)
+    m = pd.to_numeric(out["layer_z_micro_7"], errors="coerce").fillna(0.0)
+
+    trade_state = pd.Series(["WAIT"] * len(out), index=out.index, dtype="string")
+    trade_state = trade_state.where(q >= float(quality_threshold), other="DO_NOT_TRADE")
+    trade_state = trade_state.where(
+        (trade_state == "DO_NOT_TRADE") | (c >= float(confirm_threshold)),
+        other="WAIT",
+    )
+    # If both gates pass, we allow TRADE; micro influences timing/ranking only.
+    trade_state = trade_state.where(
+        (trade_state == "DO_NOT_TRADE") | (c < float(confirm_threshold)),
+        other="TRADE",
+    )
+    out["trade_state"] = trade_state
+
+    # Ranking score: micro never overrides higher layers (small weight).
+    out["edge_score"] = (q + c + 0.25 * m).astype("float64")
+
+    # Stable ordering for display: TRADE first, then WAIT, then DO_NOT_TRADE.
+    prio = (
+        out["trade_state"]
+        .astype("string")
+        .map({"TRADE": 0, "WAIT": 1, "DO_NOT_TRADE": 2})
+        .fillna(9)
+        .astype("int64")
+    )
+    out["_trade_prio"] = prio
+    out = out.sort_values(["_trade_prio", "edge_score"], ascending=[True, False]).drop(
+        columns=["_trade_prio"]
+    )
+    return out.reset_index(drop=True)
 
 
 def fetch_symbol_universe_from_table(
@@ -1967,6 +2733,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Use the top-down multi-horizon evaluation strategy (TopDownEvaluation).",
     )
     p.add_argument(
+        "--policy",
+        action="store_true",
+        help="Use the signal_layer_policy-driven live scoring workflow (policy-weighted layers + hard gates).",
+    )
+    p.add_argument(
+        "--policy-table",
+        default="intelligence.signal_layer_policy",
+        help="Policy table name. Default: intelligence.signal_layer_policy.",
+    )
+    p.add_argument(
+        "--ensure-signal-layer-policy",
+        action="store_true",
+        help="Create the signal_layer_policy table (STEP 3) and exit.",
+    )
+    p.add_argument(
+        "--seed-signal-layer-policy",
+        action="store_true",
+        help="Upsert the S&P 500 whitelist into signal_layer_policy (STEP 2/3).",
+    )
+    p.add_argument(
+        "--validate-policy-thresholds",
+        action="store_true",
+        help="When seeding policy rows, disable any whitelist signals that fail the exact horizon thresholds (STEP 1).",
+    )
+    p.add_argument(
+        "--policy-quality-threshold",
+        type=float,
+        default=0.0,
+        help="Hard gate threshold for layer_z_quality_365 (STEP 4). Default: 0.0.",
+    )
+    p.add_argument(
+        "--policy-confirm-threshold",
+        type=float,
+        default=0.0,
+        help="Hard gate threshold for layer_z_confirm_30 (STEP 4). Default: 0.0.",
+    )
+    p.add_argument(
         "--persist-topdown",
         action="store_true",
         help="Persist TopDownEvaluation results into DB tables.",
@@ -2244,6 +3047,111 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pass
 
     with db_connection(args.db_url, env_var=args.db_env_var) as conn:
+        # STEP 3/STEP 2: policy table management options.
+        if bool(getattr(args, "ensure_signal_layer_policy", False)):
+            tbl = ensure_signal_layer_policy_table(conn, table=str(args.policy_table))
+            _LOG.info("signal_layer_policy: ensured table=%s", tbl)
+            return 0
+        if bool(getattr(args, "seed_signal_layer_policy", False)):
+            rows = default_sp500_signal_layer_policy_rows()
+            if bool(getattr(args, "validate_policy_thresholds", False)):
+                # Evaluate exact thresholds and disable rows that fail.
+                perf_cache: dict[int, pd.DataFrame] = {}
+                enabled: list[SignalLayerPolicyRow] = []
+                for r in rows:
+                    h = int(r.horizon_days)
+                    if h not in perf_cache:
+                        try:
+                            perf_cache[h] = evaluate_actionable_signals_by_horizon(
+                                conn, horizon_days=h, table=str(args.score_performance_table)
+                            )
+                        except Exception as exc:
+                            _LOG.warning(
+                                "signal_layer_policy: threshold validation skipped for horizon=%s (%s)",
+                                h,
+                                exc,
+                            )
+                            perf_cache[h] = pd.DataFrame()
+                    perf = perf_cache[h]
+                    if perf.empty or "score_name" not in perf.columns:
+                        enabled.append(r)
+                        continue
+                    hit = perf[perf["score_name"].astype(str) == str(r.signal_name)]
+                    if hit.empty:
+                        enabled.append(SignalLayerPolicyRow(**{**asdict(r), "enabled": False}))
+                        _LOG.info(
+                            "signal_layer_policy: disabled (no perf row) signal=%s horizon=%s",
+                            r.signal_name,
+                            r.horizon_days,
+                        )
+                        continue
+                    ok = bool(hit["passed"].iloc[0]) if "passed" in hit.columns else True
+                    enabled.append(SignalLayerPolicyRow(**{**asdict(r), "enabled": bool(ok)}))
+                    if not ok:
+                        reason = str(hit["reason"].iloc[0]) if "reason" in hit.columns else "fails thresholds"
+                        _LOG.info(
+                            "signal_layer_policy: disabled (fails thresholds) signal=%s horizon=%s reason=%s",
+                            r.signal_name,
+                            r.horizon_days,
+                            reason,
+                        )
+                rows = enabled
+            tbl = upsert_signal_layer_policy(conn, rows, table=str(args.policy_table))
+            _LOG.info("signal_layer_policy: upserted rows=%d into table=%s", len(rows), tbl)
+            return 0
+
+        # STEP 4: policy-driven scoring workflow.
+        if bool(getattr(args, "policy", False)):
+            scored = score_sp500_from_signal_layer_policy(
+                conn,
+                baseline_table=args.baseline_table,
+                baseline_symbol_col=args.baseline_symbol_col,
+                baseline_as_of_col=baseline_as_of_col,  # type: ignore[arg-type]
+                baseline_as_of=args.baseline_as_of,
+                as_of=args.candidates_as_of or args.baseline_as_of,
+                policy_table=str(args.policy_table),
+                score_performance_table=str(args.score_performance_table),
+                quality_threshold=float(args.policy_quality_threshold),
+                confirm_threshold=float(args.policy_confirm_threshold),
+                market_regime_table="market_regime_daily",
+                market_regime_date_col="analysis_date",
+            )
+
+            shown = scored if not args.top else scored.head(int(args.top))
+            if shown.empty:
+                print("(no candidates)")
+                return 0
+            header = (
+                f"Policy candidates (rows={len(scored)}, printed={len(shown)}"
+                + (", top=all" if not args.top else f", top={int(args.top)}")
+                + "):"
+            )
+            print(header)
+            print("-" * len(header))
+            cols = [
+                c
+                for c in [
+                    "symbol",
+                    "date",
+                    "market_policy_tag",
+                    "layer_z_quality_365",
+                    "layer_z_confirm_30",
+                    "layer_z_micro_7",
+                    "trade_state",
+                    "edge_score",
+                ]
+                if c in shown.columns
+            ]
+            shown_to_print = shown[cols] if cols else shown
+            with pd.option_context("display.max_rows", None, "display.max_columns", None):
+                print(
+                    shown_to_print.to_string(
+                        index=False,
+                        formatters=_make_cli_formatters(shown_to_print),
+                    )
+                )
+            return 0
+
         evaluation: EdgeEvaluation | TopDownEvaluation | None = (
             TopDownEvaluation() if args.topdown else None
         )

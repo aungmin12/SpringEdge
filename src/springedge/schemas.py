@@ -49,6 +49,7 @@ INTELLIGENCE_TABLES: Final[tuple[str, ...]] = (
     "ray_dalio_empire_analysis",
     "risk_calendar_events",
     "score_performance_evaluation",
+    "signal_layer_policy",
     "security_universe",
     "trade_phase_tracking",
     "trade_readiness_scores",

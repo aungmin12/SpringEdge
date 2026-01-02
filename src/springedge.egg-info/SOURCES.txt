@@ -28,3 +28,4 @@ tests/test_logging_utils.py
 tests/test_schemas_registry.py
 tests/test_score_performance.py
 tests/test_selection.py
+tests/test_signal_layer_policy.py
