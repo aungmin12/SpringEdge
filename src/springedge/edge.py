@@ -1786,6 +1786,50 @@ def _run_and_print_edge(
                     except Exception:
                         n = 0
                     print(f"- {k}: {n} scores")
+
+    # Optional: select qualified symbols based on actionable score_name values
+    # stored in intelligence schema tables (see springedge.selection).
+    if getattr(args, "select_qualified", False):
+        try:
+            from .selection import pick_qualified_stocks
+
+            # Prefer explicit selection as-of; otherwise follow candidate as-of / baseline as-of.
+            sel_as_of = getattr(args, "select_as_of", None) or getattr(
+                args, "candidates_as_of", None
+            ) or getattr(args, "baseline_as_of", None)
+
+            picked = pick_qualified_stocks(
+                conn,
+                horizon_days=int(getattr(args, "select_horizon_days", 365) or 365),
+                as_of=sel_as_of,
+                regime_label=getattr(args, "select_regime_label", None),
+                pass_quantile=float(getattr(args, "select_pass_quantile", 0.8) or 0.8),
+                min_pass_fraction=float(
+                    getattr(args, "select_min_pass_fraction", 0.5) or 0.5
+                ),
+                score_performance_table=str(
+                    getattr(args, "score_performance_table", "score_performance_evaluation")
+                ),
+                return_details=True,
+            )
+
+            print("\nQualified symbols (actionable score_name selection):")
+            if picked is None or getattr(picked, "empty", True):
+                print("(none)")
+            else:
+                topn = int(getattr(args, "select_top", 50) or 50)
+                to_show = picked.head(topn)
+                with pd.option_context(
+                    "display.max_rows",
+                    None,
+                    "display.max_columns",
+                    None,
+                    "display.width",
+                    200,
+                ):
+                    print(to_show.to_string(index=False))
+        except Exception as exc:
+            _LOG.warning("selection: skipped (%s)", exc)
     return 0
 
 
@@ -1880,6 +1924,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--score-performance-table",
         default="score_performance_evaluation",
         help="Score performance source table. Default: score_performance_evaluation (also tries intelligence.score_performance_evaluation).",
+    )
+
+    # Selection (optional): derive qualified symbols from intelligence tables
+    p.add_argument(
+        "--select-qualified",
+        action="store_true",
+        help="Select qualified symbols using actionable score_name(s) from score_performance_evaluation and per-symbol values in intelligence tables.",
+    )
+    p.add_argument(
+        "--select-horizon-days",
+        type=int,
+        default=365,
+        help="Selection horizon_days to filter score_performance_evaluation. Default: 365.",
+    )
+    p.add_argument(
+        "--select-as-of",
+        default=None,
+        help="As-of date for selection (defaults to candidates-as-of, then baseline-as-of).",
+    )
+    p.add_argument(
+        "--select-regime-label",
+        default=None,
+        help="Optional regime_label filter when selecting actionable score_name(s).",
+    )
+    p.add_argument(
+        "--select-pass-quantile",
+        type=float,
+        default=0.8,
+        help="Quantile threshold for per-score pass (0.8=top/bottom quintile). Default: 0.8.",
+    )
+    p.add_argument(
+        "--select-min-pass-fraction",
+        type=float,
+        default=0.5,
+        help="Minimum fraction of actionable scores a symbol must pass. Default: 0.5.",
+    )
+    p.add_argument(
+        "--select-top",
+        type=int,
+        default=50,
+        help="How many qualified symbols to print. Default: 50.",
     )
     p.add_argument(
         "--db-url",
