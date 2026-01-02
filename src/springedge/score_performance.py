@@ -5,9 +5,14 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 import pandas as pd
+
+# NOTE: This module historically only exposed “which score_names are actionable”.
+# We now also expose richer “score specs” (including direction/sign) so downstream
+# code can actually pick stocks based on actionable score_names.
 
 # This module is primarily intended to be run/imported as part of the `springedge`
 # package. However, some users run `python3 edge.py ...` from inside `src/springedge/`,
@@ -40,6 +45,36 @@ ACTIONABLE_MIN_IC_IR = 1.5
 # while we still *compare* in decimal space internally (see
 # `_normalize_q5_q1_threshold_to_decimals`).
 ACTIONABLE_MIN_ABS_Q5_MINUS_Q1 = 5.0
+
+
+def _validate_ident_like(name: str, *, kind: str) -> str:
+    """
+    Validate a SQL identifier-like string (best-effort).
+
+    We use this to safely embed column names derived from `score_name` into SQL.
+    """
+    import re
+
+    _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    n = str(name or "").strip()
+    if not n or not _IDENT_RE.fullmatch(n):
+        raise ValueError(f"Invalid {kind} identifier: {name!r}")
+    return n
+
+
+@dataclass(frozen=True)
+class ActionableScoreSpec:
+    """
+    An actionable score definition derived from score performance stats.
+
+    - direction: +1 means higher score_value is better; -1 means lower is better.
+      This is inferred from the sign of the IC (prefers Spearman, falls back to Pearson).
+    """
+
+    score_name: str
+    horizon_days: int
+    direction: int
+    regime_label: str | None = None
 
 
 def _rollback_quietly(conn: Any) -> None:
@@ -412,6 +447,167 @@ def fetch_actionable_score_names(
     return sorted(ok[ok].index.astype(str).tolist())
 
 
+def fetch_actionable_score_specs(
+    conn: Any,
+    *,
+    table: str = "score_performance_evaluation",
+    horizon_days: int = 365,
+    # thresholds (same semantics as fetch_actionable_score_names)
+    min_abs_spearman_ic: float = ACTIONABLE_MIN_ABS_SPEARMAN_IC,
+    min_ic_ir: float = ACTIONABLE_MIN_IC_IR,
+    min_abs_q5_minus_q1: float = ACTIONABLE_MIN_ABS_Q5_MINUS_Q1,
+    require_all_regimes: bool = True,
+    q5_q1_unit: str = "auto",
+    # extra optional filters commonly needed for production selection
+    regime_label: str | None = None,
+    min_sample_size: int | None = None,
+    require_monotonic_quantiles: bool | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list[ActionableScoreSpec]:
+    """
+    Return actionable score specs (including direction) from score performance stats.
+
+    This is the “missing link” needed to go from:
+      score_performance_evaluation -> actionable score_name(s) -> pick stocks
+
+    Direction inference:
+    - prefers sign(spearman_ic)
+    - falls back to sign(pearson_ic) if spearman is missing/zero
+    - if neither is usable, the score is skipped (direction unknown)
+
+    Additional optional filters:
+    - regime_label: restrict to a single regime row (instead of aggregating across regimes)
+    - min_sample_size: require sample_size >= N when present
+    - require_monotonic_quantiles: require monotonic_quantiles == True when present
+    - start_date/end_date: restrict to a backtest window when present
+    """
+    # Reuse the existing logic for thresholds (including unit normalization).
+    actionable = fetch_actionable_score_names(
+        conn,
+        table=table,
+        horizon_days=horizon_days,
+        min_abs_spearman_ic=min_abs_spearman_ic,
+        min_ic_ir=min_ic_ir,
+        min_abs_q5_minus_q1=min_abs_q5_minus_q1,
+        require_all_regimes=require_all_regimes,
+        q5_q1_unit=q5_q1_unit,
+    )
+    if not actionable:
+        return []
+
+    df = _load_table_with_fallback(conn, table=table)
+    if df is None or df.empty:
+        return []
+    df.columns = [str(c) for c in df.columns]
+    cols = list(df.columns)
+
+    score_col = _first_present(cols, ("score_name", "score", "name"))
+    horizon_col = _first_present(
+        cols, ("horizon_days", "horizon", "horizon_day", "horizon_d")
+    )
+    regime_col = _first_present(
+        cols, ("regime_label", "regime", "market_regime", "regime_name")
+    )
+    spearman_col = _first_present(
+        cols, ("spearman_ic", "rank_ic", "ic_spearman", "spearman_rank_ic", "ic")
+    )
+    pearson_col = _first_present(cols, ("pearson_ic", "ic_pearson", "pearson"))
+    sample_col = _first_present(cols, ("sample_size", "n", "n_samples", "count"))
+    mono_col = _first_present(
+        cols, ("monotonic_quantiles", "monotonic", "is_monotonic")
+    )
+    start_col = _first_present(cols, ("start_date", "start", "window_start"))
+    end_col = _first_present(cols, ("end_date", "end", "window_end"))
+
+    if score_col is None or horizon_col is None:
+        return []
+
+    work = df.copy()
+    work[score_col] = work[score_col].astype("string")
+    work[horizon_col] = pd.to_numeric(work[horizon_col], errors="coerce").astype("Int64")
+    work = work.dropna(subset=[score_col, horizon_col]).copy()
+    work = work[work[horizon_col] == int(horizon_days)].copy()
+    if regime_label is not None and regime_col is not None:
+        work[regime_col] = work[regime_col].astype("string")
+        work = work[work[regime_col] == str(regime_label)].copy()
+    if min_sample_size is not None and sample_col is not None:
+        ss = pd.to_numeric(work[sample_col], errors="coerce").astype("float64")
+        work = work[ss >= float(min_sample_size)].copy()
+    if require_monotonic_quantiles is not None and mono_col is not None:
+        # Treat a variety of encodings: bool, 0/1, "true"/"false"
+        v = work[mono_col]
+        if v.dtype == "bool":
+            mono = v
+        else:
+            s = v.astype("string").str.strip().str.lower()
+            mono = s.isin(["true", "1", "t", "yes", "y"])
+        work = work[mono == bool(require_monotonic_quantiles)].copy()
+    if start_date is not None and start_col is not None:
+        sd = pd.to_datetime(work[start_col], errors="coerce")
+        work = work[sd >= pd.to_datetime(start_date, errors="coerce")].copy()
+    if end_date is not None and end_col is not None:
+        ed = pd.to_datetime(work[end_col], errors="coerce")
+        work = work[ed <= pd.to_datetime(end_date, errors="coerce")].copy()
+
+    work = work[work[score_col].astype(str).isin(set(map(str, actionable)))].copy()
+    if work.empty:
+        return []
+
+    sp = (
+        pd.to_numeric(work[spearman_col], errors="coerce").astype("float64")
+        if spearman_col is not None
+        else pd.Series([float("nan")] * len(work), index=work.index, dtype="float64")
+    )
+    pr = (
+        pd.to_numeric(work[pearson_col], errors="coerce").astype("float64")
+        if pearson_col is not None
+        else pd.Series([float("nan")] * len(work), index=work.index, dtype="float64")
+    )
+
+    # Direction per score_name: use mean IC sign across rows (e.g. across regimes).
+    tmp = pd.DataFrame(
+        {
+            "score_name": work[score_col].astype("string"),
+            "regime_label": work[regime_col].astype("string") if regime_col else pd.NA,
+            "_spearman": sp,
+            "_pearson": pr,
+        }
+    )
+    gb = tmp.groupby("score_name", dropna=False, sort=True)
+    sp_mean = gb["_spearman"].mean()
+    pr_mean = gb["_pearson"].mean()
+
+    out: list[ActionableScoreSpec] = []
+    for name in sp_mean.index.astype(str).tolist():
+        # Ensure score_name can be used as a column identifier later.
+        try:
+            _validate_ident_like(name, kind="score_name/column")
+        except Exception:
+            continue
+
+        sgn: float | None = None
+        v = float(sp_mean.loc[name]) if pd.notna(sp_mean.loc[name]) else float("nan")
+        if pd.notna(v) and v != 0.0:
+            sgn = v
+        else:
+            v2 = float(pr_mean.loc[name]) if pd.notna(pr_mean.loc[name]) else float("nan")
+            if pd.notna(v2) and v2 != 0.0:
+                sgn = v2
+        if sgn is None:
+            continue
+        direction = 1 if sgn > 0.0 else -1
+        out.append(
+            ActionableScoreSpec(
+                score_name=str(name),
+                horizon_days=int(horizon_days),
+                direction=int(direction),
+                regime_label=str(regime_label) if regime_label is not None else None,
+            )
+        )
+    return out
+
+
 def fetch_score_name_groups(
     conn: Any,
     *,
@@ -774,7 +970,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["fetch_actionable_score_names", "fetch_average_returns_by_horizon", "fetch_score_name_groups", "main"]
+__all__ = [
+    "ActionableScoreSpec",
+    "fetch_actionable_score_names",
+    "fetch_actionable_score_specs",
+    "fetch_average_returns_by_horizon",
+    "fetch_score_name_groups",
+    "main",
+]
 
 
 if __name__ == "__main__":
