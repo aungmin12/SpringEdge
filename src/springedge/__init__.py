@@ -30,6 +30,8 @@ __all__ = [
     "quarterly_regime_profile",
     "fetch_score_name_groups",
     "fetch_actionable_score_names",
+    "pick_qualified_stocks",
+    "ScoreValueSource",
     "connect_db",
     "db_connection",
 ]
@@ -81,6 +83,9 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "springedge.score_performance",
         "fetch_actionable_score_names",
     ),
+    # selection
+    "pick_qualified_stocks": ("springedge.selection", "pick_qualified_stocks"),
+    "ScoreValueSource": ("springedge.selection", "ScoreValueSource"),
 }
 
 
