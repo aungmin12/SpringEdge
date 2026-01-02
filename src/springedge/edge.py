@@ -1703,6 +1703,11 @@ def _run_and_print_edge(
                     "selection: filtered candidates to qualified symbols (rows=%d)",
                     len(out),
                 )
+        except ImportError as exc:
+            # Selection is an optional add-on; if the selection module (or any of its
+            # dependencies) isn't importable in a given environment, skip quietly.
+            # Keep details available for debugging without spamming normal runs.
+            _LOG.debug("selection: skipped (%s)", exc)
         except Exception as exc:
             _LOG.warning("selection: skipped (%s)", exc)
 
