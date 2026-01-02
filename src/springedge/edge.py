@@ -465,6 +465,39 @@ def persist_topdown_evaluation(
     return int(run_id)
 
 
+def _verify_topdown_persistence(
+    conn: Any,
+    *,
+    run_id: int,
+    run_table: str,
+    result_table: str,
+) -> tuple[int, int]:
+    """
+    Best-effort verification helper:
+    - returns (n_run_rows, n_result_rows) for the given run_id
+    """
+    rt = _validate_table_ref(run_table, kind="table")
+    res_t = _validate_table_ref(result_table, kind="table")
+    ph = _conn_placeholder(conn)
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SELECT COUNT(*) FROM {rt} WHERE run_id = {ph}", (int(run_id),))
+        n_run = cur.fetchone()
+        n_run_rows = int(n_run[0]) if n_run else 0
+
+        cur.execute(
+            f"SELECT COUNT(*) FROM {res_t} WHERE run_id = {ph}", (int(run_id),)
+        )
+        n_res = cur.fetchone()
+        n_result_rows = int(n_res[0]) if n_res else 0
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return n_run_rows, n_result_rows
+
+
 def fetch_ohlcv_daily(
     conn: Any,
     *,
@@ -1682,6 +1715,21 @@ def run_edge(
                 int(run_id),
                 topdown_result_table,
             )
+            try:
+                n_run_rows, n_result_rows = _verify_topdown_persistence(
+                    c,
+                    run_id=int(run_id),
+                    run_table=topdown_run_table,
+                    result_table=topdown_result_table,
+                )
+                _LOG.info(
+                    "run_edge: topdown persistence verified (run_table_rows=%d result_table_rows=%d run_id=%d)",
+                    int(n_run_rows),
+                    int(n_result_rows),
+                    int(run_id),
+                )
+            except Exception as exc:
+                _LOG.warning("run_edge: topdown persistence verification skipped (%s)", exc)
         return scored
 
     if conn is not None:
@@ -2117,6 +2165,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.candidates_as_of = args.select_as_of
 
     horizon_days = _parse_horizon_days(args.horizon_days)
+
+    # UX: `--persist-topdown` is only meaningful for the top-down evaluation strategy.
+    # If a user asks to persist but forgets `--topdown`, enable it automatically.
+    if bool(getattr(args, "persist_topdown", False)) and not bool(getattr(args, "topdown", False)):
+        _LOG.warning("--persist-topdown implies --topdown; enabling top-down evaluation.")
+        args.topdown = True
+
+    # If using the top-down strategy and the user didn't specify horizons, pick a
+    # sensible default that includes the top-down layers.
+    if bool(getattr(args, "topdown", False)) and horizon_days is None:
+        horizon_days = (7, 21, 30, 63, 126, 365)
 
     baseline_as_of_col = str(args.baseline_as_of_col or "").strip()
     if baseline_as_of_col.lower() in {"", "none", "null"}:
