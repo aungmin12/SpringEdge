@@ -1666,6 +1666,46 @@ def _run_and_print_edge(
         ),
     )
 
+    # Optional: filter to "qualified" symbols via the selection module.
+    if bool(getattr(args, "select_qualified", False)):
+        try:
+            from .selection import pick_qualified_stocks
+
+            select_as_of = getattr(args, "select_as_of", None) or getattr(
+                args, "candidates_as_of", None
+            )
+            select_horizon = int(getattr(args, "select_horizon_days", 365) or 365)
+
+            qualified = pick_qualified_stocks(
+                conn,
+                horizon_days=select_horizon,
+                as_of=select_as_of,
+                score_performance_table=str(getattr(args, "score_performance_table")),
+                return_details=True,
+            )
+            if qualified is None or getattr(qualified, "empty", True):
+                _LOG.warning(
+                    "selection: --select-qualified requested but no actionable/qualified symbols found; skipping selection filter"
+                )
+            else:
+                q = qualified.copy()
+                # Avoid colliding with candidate `date` (which is OHLCV/feature as-of).
+                if "date" in q.columns:
+                    q = q.rename(columns={"date": "select_date"})
+                keep_cols = [
+                    c
+                    for c in ("symbol", "select_date", "pass_count", "n_scores", "pass_rate")
+                    if c in q.columns
+                ]
+                q = q[keep_cols].copy() if keep_cols else q
+                out = out.merge(q, on="symbol", how="inner")
+                _LOG.info(
+                    "selection: filtered candidates to qualified symbols (rows=%d)",
+                    len(out),
+                )
+        except Exception as exc:
+            _LOG.warning("selection: skipped (%s)", exc)
+
     score_groups: Any = None
     if not args.no_score_performance:
         try:
@@ -1946,6 +1986,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Build one row per symbol as-of this date.",
     )
     p.add_argument(
+        "--select-qualified",
+        action="store_true",
+        help=(
+            "Filter printed candidates to symbols qualified by actionable score_names "
+            "(uses springedge.selection.pick_qualified_stocks)."
+        ),
+    )
+    p.add_argument(
+        "--select-as-of",
+        default=None,
+        help=(
+            "As-of date for qualification selection (also used as candidates-as-of when "
+            "--candidates-as-of is not provided)."
+        ),
+    )
+    p.add_argument(
+        "--select-horizon-days",
+        type=int,
+        default=365,
+        help="Horizon (days) used for qualification selection. Default: 365.",
+    )
+    p.add_argument(
         "--top",
         type=int,
         default=0,
@@ -1957,6 +2019,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     level = getattr(logging, str(args.log_level).upper(), logging.INFO)
     configure_logging(level=level)
+
+    # Compatibility: callers often think in selection terms ("select as-of").
+    # If provided, treat it as the default candidates-as-of as well.
+    if getattr(args, "candidates_as_of", None) is None and getattr(args, "select_as_of", None):
+        args.candidates_as_of = args.select_as_of
 
     horizon_days = _parse_horizon_days(args.horizon_days)
 
