@@ -970,7 +970,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["fetch_actionable_score_names", "fetch_average_returns_by_horizon", "fetch_score_name_groups", "main"]
+__all__ = [
+    "ActionableScoreSpec",
+    "fetch_actionable_score_names",
+    "fetch_actionable_score_specs",
+    "fetch_average_returns_by_horizon",
+    "fetch_score_name_groups",
+    "main",
+]
 
 
 if __name__ == "__main__":
