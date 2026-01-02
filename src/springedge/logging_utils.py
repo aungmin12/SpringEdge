@@ -53,6 +53,20 @@ class TableLogFormatter(logging.Formatter):
         )
         return f"{ts_cell} | {level_cell} | {name_cell} | {msg}"
 
+    def _display_logger_name(self, name: str) -> str:
+        """
+        Produce a compact logger name for console logs.
+
+        We intentionally hide the top-level package prefix for readability:
+          "springedge.edge" -> "edge"
+          "springedge.score_performance" -> "score_performance"
+        """
+        n = "" if name is None else str(name)
+        prefix = "springedge."
+        if n.startswith(prefix):
+            return n[len(prefix) :]
+        return n
+
     def format(self, record: logging.LogRecord) -> str:
         # Keep logging's semantics for %-formatting, lazy args, etc.
         message = record.getMessage()
@@ -64,15 +78,16 @@ class TableLogFormatter(logging.Formatter):
 
         ts = self.formatTime(record, self.datefmt)
         level = record.levelname
-        name = record.name
+        name = self._display_logger_name(record.name)
 
-        out: list[str] = [self._format_row(ts, level, name, lines[0])]
+        first = self._format_row(ts, level, name, lines[0])
+        out: list[str] = [first]
         if len(lines) > 1:
-            blank_ts = ""
-            blank_level = ""
-            blank_name = ""
+            # Make continuation lines readable by avoiding repeated empty "table cells".
+            # Align under the message column and prefix with a subtle marker.
+            msg_indent = " " * (self._ts_width + 3 + self._level_width + 3 + self._name_width + 3)
             for line in lines[1:]:
-                out.append(self._format_row(blank_ts, blank_level, blank_name, line))
+                out.append(f"{msg_indent}↳ {line}")
         return "\n".join(out)
 
 

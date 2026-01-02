@@ -60,6 +60,81 @@ _LOG = logging.getLogger("springedge.edge" if __name__ == "__main__" else __name
 _LOG_SYMBOLS_PREVIEW_LIMIT = 50
 
 
+def _safe_float(x: object) -> float | None:
+    try:
+        v = float(x)  # type: ignore[arg-type]
+    except Exception:
+        return None
+    return v if np.isfinite(v) else None
+
+
+def _make_cli_formatters(df: pd.DataFrame) -> dict[str, Any]:
+    """
+    Provide stable, readable number formatting for CLI tables.
+
+    We keep this intentionally conservative (only applies to well-known columns) so it
+    doesn't unexpectedly change formatting for user-defined/custom columns.
+    """
+
+    def _fmt_int(x: object) -> str:
+        v = _safe_float(x)
+        if v is None:
+            return ""
+        return f"{int(round(v)):,}"
+
+    def _fmt_2(x: object) -> str:
+        v = _safe_float(x)
+        if v is None:
+            return ""
+        return f"{v:,.2f}"
+
+    def _fmt_4(x: object) -> str:
+        v = _safe_float(x)
+        if v is None:
+            return ""
+        return f"{v:,.4f}"
+
+    def _fmt_6(x: object) -> str:
+        v = _safe_float(x)
+        if v is None:
+            return ""
+        return f"{v:,.6f}"
+
+    def _fmt_sci(x: object) -> str:
+        v = _safe_float(x)
+        if v is None:
+            return ""
+        return f"{v:.3e}"
+
+    fmts: dict[str, Any] = {}
+
+    # Common price/liquidity fields.
+    for c in ("close", "open", "high", "low", "vix_level", "move_level"):
+        if c in df.columns:
+            fmts[c] = _fmt_2
+    for c in ("volume",):
+        if c in df.columns:
+            fmts[c] = _fmt_int
+    for c in ("liquidity",):
+        if c in df.columns:
+            fmts[c] = _fmt_sci
+
+    # Regime context metrics.
+    for c in ("regime_score", "position_multiplier"):
+        if c in df.columns:
+            fmts[c] = _fmt_2
+    for c in ("vix_zscore", "move_zscore", "vix9d_over_vix", "vix_vix3m_ratio"):
+        if c in df.columns:
+            fmts[c] = _fmt_4
+
+    # Scores: keep precision (these are often used for ranking/debugging).
+    for c in ("edge_score", "edge_score_topdown", "topdown_gate"):
+        if c in df.columns:
+            fmts[c] = _fmt_6
+
+    return fmts
+
+
 def _validate_symbols(symbols: Sequence[str]) -> list[str]:
     out: list[str] = []
     for s in symbols:
@@ -1774,11 +1849,23 @@ def _run_and_print_edge(
         cols = _pick_cli_columns(shown)
         shown_to_print = shown[cols].copy()
 
-    # Keep the CLI output compact and stable.
-    with pd.option_context(
-        "display.max_rows", None, "display.max_columns", None, "display.width", 200
-    ):
-        print(shown_to_print.to_string(index=False))
+    # --- Print candidates (stable, human-friendly formatting)
+    total_n = int(len(out))
+    shown_n = int(len(shown_to_print))
+    header = (
+        f"Candidates (rows={total_n}, printed={shown_n}"
+        + (", top=all" if not args.top else f", top={int(args.top)}")
+        + "):"
+    )
+    print(header)
+    print("-" * len(header))
+    with pd.option_context("display.max_rows", None, "display.max_columns", None):
+        print(
+            shown_to_print.to_string(
+                index=False,
+                formatters=_make_cli_formatters(shown_to_print),
+            )
+        )
 
     # `fetch_score_name_groups()` returns a DataFrame, which cannot be used in a boolean
     # context (pandas raises: "The truth value of a DataFrame is ambiguous.").
@@ -1788,6 +1875,7 @@ def _run_and_print_edge(
         if isinstance(score_groups, pd.DataFrame):
             if not score_groups.empty:
                 print("\nScore performance groups:")
+                print("------------------------")
 
                 # By default, do NOT print the full score_names lists (they can be huge).
                 cols = [
@@ -1818,8 +1906,6 @@ def _run_and_print_edge(
                     None,
                     "display.max_columns",
                     None,
-                    "display.width",
-                    200,
                 ):
                     print(score_groups_to_print.to_string(index=False))
         elif isinstance(score_groups, dict):
