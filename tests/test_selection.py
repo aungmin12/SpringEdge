@@ -98,3 +98,38 @@ def test_pick_qualified_stocks_uses_score_name_columns_and_direction() -> None:
     assert out["symbol"].tolist() == ["CCC"]
     assert out["pass_count"].iloc[0] == 2
 
+
+def test_fetch_latest_score_values_with_aliases_supports_dotted_score_names() -> None:
+    conn = sqlite3.connect(":memory:")
+
+    # Physical table uses identifier-safe underscore column.
+    conn.execute(
+        """
+        create table nonuple_analysis (
+          symbol text,
+          analysis_date text,
+          nonuple_growth real
+        )
+        """
+    )
+    conn.executemany(
+        "insert into nonuple_analysis (symbol, analysis_date, nonuple_growth) values (?, ?, ?)",
+        [
+            ("AAA", "2024-01-01", 1.0),
+            ("BBB", "2024-01-01", 2.0),
+        ],
+    )
+
+    from springedge.selection import ScoreValueSource, fetch_latest_score_values_with_aliases
+
+    out = fetch_latest_score_values_with_aliases(
+        conn,
+        scores=["nonuple.growth"],
+        sources=[ScoreValueSource("nonuple_analysis", "symbol", "analysis_date")],
+        as_of="2024-01-01",
+    )
+
+    # Output column name should be the requested dotted score name.
+    assert out.columns.tolist() == ["symbol", "date", "nonuple.growth"]
+    assert out.sort_values("symbol")["nonuple.growth"].tolist() == [1.0, 2.0]
+

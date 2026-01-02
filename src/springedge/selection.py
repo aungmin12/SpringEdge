@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Stock selection utilities.
 
@@ -11,15 +9,16 @@ and
 It answers: “given actionable score_names, which symbols are currently qualified?”
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable
 
-import numpy as np
 import pandas as pd
 
 from .layers import _as_iso_date, _validate_table_ref
-from .score_performance import ActionableScoreSpec, fetch_actionable_score_specs
+from .score_performance import fetch_actionable_score_specs
 
 
 @dataclass(frozen=True)
@@ -67,8 +66,20 @@ def fetch_table_columns(conn: Any, *, table: str) -> list[str]:
     try:
         try:
             cur.execute(f"SELECT * FROM {t} WHERE 1=0")
-        except Exception:
+        except Exception as exc:
             _safe_rollback(conn)
+            # Best-effort: if the table is missing, treat as "no columns" so
+            # discovery can fall back to other sources.
+            msg = str(exc).lower()
+            tn = str(table).lower()
+            candidates = {tn}
+            if "." in tn:
+                candidates.add(tn.split(".")[-1])
+            if any(
+                (f'relation "{c}" does not exist' in msg) or (f"no such table: {c}" in msg)
+                for c in candidates
+            ):
+                return []
             raise
         cols = [d[0] for d in (cur.description or [])]
     finally:
@@ -103,6 +114,73 @@ def discover_score_sources(
         for src in sources:
             if s in table_cols.get(src.table, set()):
                 out[s] = src
+                break
+    return out
+
+
+def _candidate_column_names(score_name: str) -> list[str]:
+    """
+    Best-effort mapping from a logical score_name to possible physical column names.
+
+    Production score catalogs often use dotted names (e.g. "nonuple.growth"), while
+    DB tables are typically wide and use identifier-safe columns (e.g. nonuple_growth).
+
+    We attempt a few common normalizations:
+    - exact name (for already-safe names)
+    - replace '.' with '_' (nonuple.growth -> nonuple_growth)
+    - last segment (nonuple.growth -> growth)
+    """
+    s = str(score_name or "").strip()
+    if not s:
+        return []
+    cands: list[str] = [s]
+    if "." in s:
+        cands.append(s.replace(".", "_"))
+        tail = s.split(".")[-1].strip()
+        if tail:
+            cands.append(tail)
+    # stable de-dupe
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in cands:
+        c = str(c).strip()
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
+
+
+def discover_score_sources_with_aliases(
+    conn: Any,
+    *,
+    score_names: Iterable[str],
+    sources: Iterable[ScoreValueSource],
+) -> dict[str, tuple[ScoreValueSource, str]]:
+    """
+    Map requested score_name -> (source_table, actual_column_name).
+
+    Unlike `discover_score_sources`, this supports dotted score names by trying
+    `_candidate_column_names(score_name)` against each source's column set.
+    """
+    wanted = [str(s) for s in score_names if str(s).strip() != ""]
+    if not wanted:
+        return {}
+
+    # Preload each table's column set once.
+    table_cols: dict[str, set[str]] = {}
+    for src in sources:
+        cols = fetch_table_columns(conn, table=src.table)
+        table_cols[src.table] = set(map(str, cols))
+
+    out: dict[str, tuple[ScoreValueSource, str]] = {}
+    for requested in wanted:
+        for cand in _candidate_column_names(requested):
+            for src in sources:
+                if cand in table_cols.get(src.table, set()):
+                    out[requested] = (src, cand)
+                    break
+            if requested in out:
                 break
     return out
 
@@ -212,6 +290,118 @@ def fetch_latest_score_values(
     return out
 
 
+def fetch_latest_score_values_with_aliases(
+    conn: Any,
+    *,
+    scores: list[str],
+    sources: list[ScoreValueSource],
+    as_of: str | date | datetime | None = None,
+    start: str | date | datetime | None = None,
+) -> pd.DataFrame:
+    """
+    Like `fetch_latest_score_values`, but supports dotted score names.
+
+    - Selects physical columns using `discover_score_sources_with_aliases`
+    - Renames selected columns back to the requested score_name(s) in the output
+    """
+    if not scores:
+        return pd.DataFrame(columns=["symbol", "date"])
+
+    mapping = discover_score_sources_with_aliases(
+        conn, score_names=scores, sources=sources
+    )
+    if not mapping:
+        return pd.DataFrame(columns=["symbol", "date"])
+
+    # Group requested score columns per source table to minimize queries.
+    by_table: dict[str, list[tuple[str, str]]] = {}
+    for requested in scores:
+        m = mapping.get(requested)
+        if m is None:
+            continue
+        src, actual = m
+        by_table.setdefault(src.table, []).append((str(requested), str(actual)))
+
+    ph = _conn_placeholder(conn)
+    as_of_iso = _as_iso_date(as_of) if as_of is not None else None
+    start_iso = _as_iso_date(start) if start is not None else None
+
+    frames: list[pd.DataFrame] = []
+    for src in sources:
+        pairs = by_table.get(src.table)
+        if not pairs:
+            continue
+        requested_cols = [p[0] for p in pairs]
+        actual_cols = [p[1] for p in pairs]
+
+        t = _validate_table_ref(src.table, kind="table")
+        sym_c = _validate_table_ref(src.symbol_col, kind="column")  # ident validation
+        dt_c = _validate_table_ref(src.date_col, kind="column")
+
+        where: list[str] = []
+        params: list[Any] = []
+        if start_iso is not None:
+            where.append(f"{dt_c} >= {ph}")
+            params.append(start_iso)
+        if as_of_iso is not None:
+            where.append(f"{dt_c} <= {ph}")
+            params.append(as_of_iso)
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        cols_sql = ", ".join(
+            [sym_c, dt_c]
+            + [_validate_table_ref(c, kind="column") for c in actual_cols]
+        )
+        sql = f"SELECT {cols_sql} FROM {t} {where_sql}"
+
+        cur = conn.cursor()
+        try:
+            try:
+                cur.execute(sql, tuple(params))
+            except Exception:
+                _safe_rollback(conn)
+                raise
+            rows = cur.fetchall()
+            out_cols = [d[0] for d in (cur.description or [])]
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+
+        df = pd.DataFrame.from_records(rows, columns=out_cols)
+        if df.empty:
+            continue
+
+        df = df.rename(columns={src.symbol_col: "symbol", src.date_col: "date"})
+        df["symbol"] = df["symbol"].astype("string")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+        rename_map: dict[str, str] = {}
+        for requested, actual in pairs:
+            if actual in df.columns:
+                df[actual] = pd.to_numeric(df[actual], errors="coerce").astype("float64")
+                rename_map[actual] = requested
+        if rename_map:
+            df = df.rename(columns=rename_map)
+
+        df = df.dropna(subset=["symbol", "date"]).copy()
+        if df.empty:
+            continue
+        idx = df.groupby("symbol", sort=False)["date"].idxmax()
+        df = df.loc[idx].reset_index(drop=True)
+        keep = ["symbol", "date"] + [c for c in requested_cols if c in df.columns]
+        frames.append(df[keep])
+
+    if not frames:
+        return pd.DataFrame(columns=["symbol", "date"])
+
+    out = frames[0]
+    for f in frames[1:]:
+        out = out.merge(f, on=["symbol", "date"], how="outer")
+    return out
+
+
 def pick_qualified_stocks(
     conn: Any,
     *,
@@ -302,7 +492,6 @@ def pick_qualified_stocks(
 
     # Percentile rank per score (stable, avoids qcut duplicate-edge issues).
     pass_cols: list[str] = []
-    n = len(specs)
     hi = float(pass_quantile)
     lo = float(1.0 - pass_quantile)
     for spec in specs:
@@ -338,7 +527,9 @@ __all__ = [
     "ScoreValueSource",
     "fetch_table_columns",
     "discover_score_sources",
+    "discover_score_sources_with_aliases",
     "fetch_latest_score_values",
+    "fetch_latest_score_values_with_aliases",
     "pick_qualified_stocks",
 ]
 

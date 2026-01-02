@@ -42,6 +42,7 @@ def test_schema_registry_contains_expected_tables() -> None:
         "ray_dalio_empire_analysis",
         "risk_calendar_events",
         "score_performance_evaluation",
+        "signal_layer_policy",
         "security_universe",
         "trade_phase_tracking",
         "trade_readiness_scores",
