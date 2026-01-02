@@ -12,6 +12,7 @@ src/springedge/logging_utils.py
 src/springedge/regime.py
 src/springedge/schemas.py
 src/springedge/score_performance.py
+src/springedge/selection.py
 src/springedge.egg-info/PKG-INFO
 src/springedge.egg-info/SOURCES.txt
 src/springedge.egg-info/dependency_links.txt
@@ -19,9 +20,11 @@ src/springedge.egg-info/requires.txt
 src/springedge.egg-info/top_level.txt
 tests/test_db.py
 tests/test_db_layers_and_regime.py
+tests/test_edge_cli_selection_flags.py
 tests/test_edge_end_to_end.py
 tests/test_features.py
 tests/test_intelligence_imports.py
 tests/test_logging_utils.py
 tests/test_schemas_registry.py
 tests/test_score_performance.py
+tests/test_selection.py
